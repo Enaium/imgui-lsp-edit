@@ -5,6 +5,7 @@ import cn.enaium.imgui.ImGuiCond
 import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
 import cn.enaium.lsp.edit.Editor
+import cn.enaium.lsp.edit.JetBrainsThemes
 import cn.enaium.lsp.edit.syntax.treesitter.TreeSitterHighlighter
 
 /**
@@ -46,6 +47,9 @@ private class SyntaxExampleApp {
 
     /** Current selection index into [specs]. */
     private val current = IntArray(1)
+
+    /** Current JetBrains theme index into [JetBrainsThemes.all]. */
+    private val themeIndex = IntArray(1)
 
     private var highlighter: TreeSitterHighlighter? = null
 
@@ -99,6 +103,19 @@ private class SyntaxExampleApp {
             ImGui.endCombo()
         }
         ImGui.textWrapped("(${specs.size} grammars — tree-sitter)")
+        ImGui.text("Theme:")
+        ImGui.sameLine()
+        val themes = JetBrainsThemes.all
+        if (ImGui.beginCombo("##theme", themes[themeIndex[0]].first)) {
+            for (i in themes.indices) {
+                if (ImGui.selectable(themes[i].first, i == themeIndex[0])) {
+                    themeIndex[0] = i
+                    editor.palette = themes[i].second
+                }
+            }
+            ImGui.endCombo()
+        }
+        ImGui.textWrapped("(${themes.size} JetBrains themes)")
 
         // ==================== Editor ====================
         // Reserve the bottom status line so it never renders outside the
