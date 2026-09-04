@@ -74,6 +74,8 @@ private class KotlinLspApp(
     @Volatile
     private var status = "starting $serverCommand…"
     private var diagnosticsCount = 0
+    private val messages = ArrayDeque<String>()
+    private val showIndentGuides = BooleanArray(1)
 
     private val process: Process
     private val client: LspClient
@@ -120,8 +122,18 @@ private class KotlinLspApp(
                 println("kotlin-lsp: server failed: ${e.message}")
             }
         }
-        lspEditor.onShowMessage = { status = it }
-        lspEditor.onLogMessage = { status = it }
+        lspEditor.onShowMessage = { msg ->
+            status = msg
+            logMessage("show: $msg")
+        }
+        lspEditor.onLogMessage = { msg ->
+            logMessage("log: $msg")
+        }
+    }
+
+    private fun logMessage(msg: String) {
+        messages.addLast(msg)
+        while (messages.size > 50) messages.removeFirst()
     }
 
     fun draw(frame: Int) {
@@ -137,24 +149,55 @@ private class KotlinLspApp(
                 ImGuiWindowFlags.NO_RESIZE or
                 ImGuiWindowFlags.NO_TITLE_BAR or
                 ImGuiWindowFlags.NO_COLLAPSE or
-                ImGuiWindowFlags.NO_SAVED_SETTINGS,
+                ImGuiWindowFlags.NO_SAVED_SETTINGS or
+                ImGuiWindowFlags.NO_SCROLLBAR,
         )
 
         if (ImGui.button("Go to definition (F12)")) lspEditor.gotoDefinition()
         ImGui.sameLine()
         if (ImGui.button("Completion (Ctrl+Space)")) lspEditor.requestCompletion()
+        ImGui.sameLine()
+        if (ImGui.button("Format")) lspEditor.formatDocument()
+        ImGui.sameLine()
+        if (ImGui.checkbox("Indent guides", showIndentGuides)) {
+            editor.showIndentGuides = showIndentGuides[0]
+        }
 
         diagnosticsCount = editor.markers.size
 
+        // Reserve the bottom for the status bar + message log; the editor
+        // fills the remaining space, so the status text never falls outside
+        // the window.
+        val statusH = ImGui.getTextLineHeightWithSpacing() + 8f
+        val logH = 120f
+        val avail = ImGui.getContentRegionAvail()
+        val editorHeight = (avail.y - statusH - logH).coerceAtLeast(100f)
+
         editor.overlay = { lspEditor.renderCompletionPopup() }
-        editor.render("##editor", ImVec2(-1f, -1f))
+        editor.render("##editor", ImVec2(-1f, editorHeight))
         lspEditor.renderHoverTooltip()
 
+        // Status bar (fixed at the bottom of the window).
         val cursor = editor.cursor
+        ImGui.separator()
         ImGui.text(
             "status: $status   |   ${file.fileName}   |   Ln ${cursor.line + 1}, Col ${cursor.index + 1}   |   " +
                 "diagnostics: $diagnosticsCount   |   frame: $frame",
         )
+
+        // Server messages (window/showMessage, window/logMessage) so errors
+        // and warnings are visible, inside a fixed-height area with its own
+        // scrollbar.
+        ImGui.separator()
+        if (ImGui.button("Clear messages")) messages.clear()
+        ImGui.sameLine()
+        ImGui.text("server messages (${messages.size})")
+        val remaining = ImGui.getContentRegionAvail().y
+        ImGui.beginChild("##messages", ImVec2(-1f, remaining.coerceAtLeast(40f)))
+        for (msg in messages) {
+            ImGui.textWrapped(msg)
+        }
+        ImGui.endChild()
 
         if (ImGui.isKeyPressed(ImGuiKey.F12)) lspEditor.gotoDefinition()
         if (ImGui.isKeyDown(ImGuiKey.MOD_CTRL) && ImGui.isKeyPressed(ImGuiKey.SPACE)) {

@@ -9,6 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
@@ -30,6 +32,16 @@ class LspClient(
 ) : AutoCloseable {
 
     private val launcher = JsonRpcLauncher(transport)
+
+    /**
+     * Serializes all client→server requests: language servers (especially
+     * IntelliJ-based ones) compute features under a read lock, and concurrent
+     * requests wedge that lock — after a burst of edits every feature stops
+     * answering. With one request in flight at a time the server is never
+     * asked to do overlapping work.
+     */
+    private val requestMutex = Mutex()
+
     private var initialized = false
     private var serverCapabilities: ServerCapabilities? = null
 
@@ -223,6 +235,18 @@ class LspClient(
             ListSerializer(FoldingRange.serializer()),
         )
 
+    /** Requests formatting edits for the whole document (tabSize = 4, spaces). */
+    suspend fun formatting(uri: String): List<TextEdit>? =
+        nullableRequest(
+            "textDocument/formatting",
+            DocumentFormattingParams(
+                textDocument = TextDocumentIdentifier(uri),
+                options = FormattingOptions(tabSize = 4, insertSpaces = true),
+            ),
+            DocumentFormattingParams.serializer(),
+            ListSerializer(TextEdit.serializer()),
+        )
+
     /** The server's capabilities, populated after [initialize]. */
     fun getServerCapabilities(): ServerCapabilities? = serverCapabilities
 
@@ -307,7 +331,13 @@ class LspClient(
         resultSerializer: KSerializer<R>,
     ): R? {
         return try {
-            launcher.request(method, params, paramsSerializer, resultSerializer)
+            requestMutex.withLock {
+                // Bound the wait so a wedged server cannot stall the queue
+                // forever; the caller re-issues on the next edit.
+                withTimeout(30_000) {
+                    launcher.request(method, params, paramsSerializer, resultSerializer)
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {

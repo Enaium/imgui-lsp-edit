@@ -64,9 +64,16 @@ class DiffView(
         val lineHeight = ImGui.getTextLineHeight().coerceAtLeast(1f)
         val charWidth = ImGui.calcTextSize("M").x.coerceAtLeast(1f)
         val avail = ImGui.getContentRegionAvail()
-        val origin = ImGui.getCursorScreenPos()
+        val cursorPos = ImGui.getCursorScreenPos()
         val scrollX = ImGui.getScrollX()
         val scrollY = ImGui.getScrollY()
+        // The cursor's screen position is scroll-subtracted (it points at
+        // the content origin, which moves with the scroll). Add the scroll
+        // back so origin describes the FIXED viewport; the drawing code then
+        // applies the scroll exactly once. Without this, scrolled frames
+        // rendered everything off-screen (double-subtracting the scroll).
+        val originX = cursorPos.x + scrollX
+        val originY = cursorPos.y + scrollY
 
         val lines = Diff.compute(oldText, newText)
 
@@ -75,17 +82,21 @@ class DiffView(
         val paneW = ((avail.x - gutterW * 2 - 1f) / 2f).coerceAtLeast(1f)
         val contentHeight = (lines.size * lineHeight).coerceAtLeast(avail.y)
 
-        // Background.
+        // Background: fixed to the viewport (not the scrolled content).
         val drawList = ImGui.getWindowDrawList()
-        drawList.DrawRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), background.toImGuiColor())
+        drawList.DrawRectFilled(
+            ImVec2(originX, originY),
+            ImVec2(originX + avail.x, originY + avail.y),
+            background.toImGuiColor(),
+        )
 
         val firstRow = (scrollY / lineHeight).toInt().coerceAtLeast(0)
         val lastRow = ((scrollY + avail.y) / lineHeight).toInt().coerceAtMost(lines.size - 1)
 
         for (row in firstRow..lastRow) {
             val line = lines[row]
-            val y = origin.y + row * lineHeight - scrollY
-            val leftX = origin.x - scrollX
+            val y = originY + row * lineHeight - scrollY
+            val leftX = originX - scrollX
             val rightX = leftX + gutterW + paneW + 1f
 
             val isRemoved = line.kind == DiffKind.REMOVED
@@ -138,16 +149,16 @@ class DiffView(
                 drawList.DrawText(
                     ImVec2(rightX + gutterW + 4f, y),
                     line.text,
-                    textColor,
+                    textColor.toImGuiColor(),
                 )
             }
         }
 
         // Center separator between the two panes.
-        val sepX = origin.x - scrollX + gutterW + paneW + 0.5f
+        val sepX = originX - scrollX + gutterW + paneW + 0.5f
         drawList.DrawLine(
-            ImVec2(sepX, origin.y),
-            ImVec2(sepX, origin.y + avail.y),
+            ImVec2(sepX, originY),
+            ImVec2(sepX, originY + avail.y),
             separator.toImGuiColor(),
             1f,
         )

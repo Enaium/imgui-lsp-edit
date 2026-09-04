@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -41,11 +42,14 @@ class CompletionPopupRenderTest {
         override fun workspaceService(): cn.enaium.lsp.WorkspaceService? = null
         override fun windowService(): cn.enaium.lsp.WindowService? = null
 
+        val completionCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
         override fun textDocumentService(): TextDocumentService = object : TextDocumentService {
             override fun didOpen(params: DidOpenTextDocumentParams) {}
             override fun didChange(params: DidChangeTextDocumentParams) {}
-            override fun completion(params: CompletionParams): CompletionResult =
-                CompletionResult.ListValue(
+            override fun completion(params: CompletionParams): CompletionResult {
+                completionCalls.incrementAndGet()
+                return CompletionResult.ListValue(
                     CompletionList(
                         items = listOf(
                             CompletionItem(
@@ -68,6 +72,7 @@ class CompletionPopupRenderTest {
                         ),
                     ),
                 )
+            }
         }
     }
 
@@ -127,6 +132,76 @@ class CompletionPopupRenderTest {
             assertTrue(dd.cmdListsCount > 0, "completion popup produced no draw lists")
 
             lspEditor.close()
+            pair.close()
+            serverScope.cancel()
+        } finally {
+            ImGui.destroyContext(ctx)
+        }
+    }
+
+    @Test
+    fun acceptingCompletionDoesNotRetrigger() {
+        val ctx = ImGui.createContext()
+        try {
+            val io = ImGui.getIO()
+            io.displaySize = ImVec2(1280f, 800f)
+            io.deltaTime = 1f / 60f
+            io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
+            check(io.fonts.build()) { "font build failed" }
+            io.fonts.setTexID(0)
+            ImGui.newFrame()
+
+            val pair = InMemoryTransportPair()
+            val server = TestServer()
+            val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            serverScope.launch {
+                LanguageServerLauncher(pair.b, server).listen()
+            }
+            val editor = Editor(initialText = "fun main() {\n    val x = pri\n}", language = Language.kotlin)
+            val lspEditor = LspEditor(
+                editor = editor,
+                client = LspClient(pair.a),
+                uri = "file:///test.kt",
+                languageId = "kotlin",
+            )
+
+            runBlocking {
+                lspEditor.start(processId = 123)
+                editor.setCursor(cn.enaium.lsp.edit.DocPos(1, 14))
+                editor.inputText("n")
+                val deadline = System.currentTimeMillis() + 5_000
+                while (!lspEditor.completionActive && System.currentTimeMillis() < deadline) {
+                    delay(20)
+                }
+                assertTrue(lspEditor.completionActive, "completion popup must open")
+                val callsBefore = server.completionCalls.get()
+
+                // Accept with Enter: the popup must close and the acceptance
+                // edit must NOT re-request completion.
+                io.addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, true)
+                io.addKeyEvent(cn.enaium.imgui.ImGuiKey.ENTER, false)
+                ImGui.newFrame()
+                ImGui.begin("##win")
+                editor.render("##editor")
+                lspEditor.renderCompletionPopup()
+                ImGui.end()
+                ImGui.render()
+
+                assertFalse(lspEditor.completionActive, "accepted completion must close the popup")
+                assertTrue(
+                    editor.getText().contains("val x = println"),
+                    "accepted item must be inserted, got: ${editor.getText()}",
+                )
+                delay(500)
+                assertTrue(
+                    server.completionCalls.get() == callsBefore,
+                    "acceptance edit must not re-trigger completion: " +
+                        "${server.completionCalls.get()} vs $callsBefore",
+                )
+                assertFalse(lspEditor.completionActive, "popup must stay closed after the accept edit")
+
+                lspEditor.close()
+            }
             pair.close()
             serverScope.cancel()
         } finally {

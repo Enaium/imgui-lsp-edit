@@ -37,13 +37,16 @@ import kotlinx.coroutines.launch
  * pass `--frames N` / `IMGUI_KMP_FRAMES=N` to exit after N frames (headless
  * CI runs).
  */
-fun runLspEditorExample(frames: Int = Int.MAX_VALUE) {
+fun runLspEditorExample(frames: Int = Int.MAX_VALUE, fallbackFontPath: String? = null) {
     var app: LspEditorApp? = null
     SdlRendererApp.run(
         title = "lsp-edit example",
         frames = frames,
         // 10px variant of the editor font for inlay hints.
         extraFontSizePx = 10f,
+        // Merge a fallback font (e.g. a CJK font) so glyphs the main font
+        // lacks still render; pass null to disable.
+        fallbackFontPath = fallbackFontPath,
         init = { extraFont ->
             app = LspEditorApp().apply { editor.inlayHintFont = extraFont }
         },
@@ -256,15 +259,6 @@ private class LspEditorApp {
         ImGui.separator()
         val (line, index) = editor.cursor
         val lines = editor.lineCount()
-        // ==================== Diff view ====================
-        if (showDiff[0]) {
-            ImGui.setNextWindowPos(ImVec2(80f, 60f), ImGuiCond.FIRST_USE_EVER)
-            ImGui.setNextWindowSize(ImVec2(900f, 500f), ImGuiCond.FIRST_USE_EVER)
-            ImGui.begin("Diff (old -> new)")
-            diffView.render("##diff")
-            ImGui.end()
-        }
-
         ImGui.text(
             "status: $status   |   Ln $line, Col $index   |   ${lines} lines   |   " +
                 "diagnostics: $diagnosticsCount   |   version: ${lspEditor.version}   |   frame: $frame",
@@ -278,6 +272,19 @@ private class LspEditorApp {
             lspEditor.requestCompletion()
         }
         ImGui.end()
+
+        // ==================== Diff view ====================
+        // Rendered as its own top-level window AFTER the fullscreen editor
+        // window closes: beginning a window inside another window's
+        // begin/end can leave it clipped or hidden behind the fullscreen
+        // parent, so the diff never shows.
+        if (showDiff[0]) {
+            ImGui.setNextWindowPos(ImVec2(80f, 60f), ImGuiCond.FIRST_USE_EVER)
+            ImGui.setNextWindowSize(ImVec2(900f, 500f), ImGuiCond.FIRST_USE_EVER)
+            ImGui.begin("Diff (old -> new)")
+            diffView.render("##diff")
+            ImGui.end()
+        }
     }
 
     fun close() {
@@ -292,6 +299,7 @@ private class LspEditorApp {
     companion object {
         val SAMPLE_KOTLIN_MODIFIED = """
             |// A small Kotlin sample for the lsp-edit demo.
+            |// 中文注释：依赖回退字体渲染（fallback font）。
             |package demo
             |
             |import kotlin.math.sqrt
@@ -316,6 +324,7 @@ private class LspEditorApp {
 
         val SAMPLE_KOTLIN = """
             |// A small Kotlin sample for the lsp-edit demo.
+            |// 中文注释：依赖回退字体渲染（fallback font）。
             |package demo
             |
             |import kotlin.math.sqrt

@@ -63,6 +63,7 @@ class LspEditor(
     private val pendingDiagnostics = Channel<PublishDiagnosticsParams>(Channel.UNLIMITED)
     private val pendingMessages = Channel<MessageParams>(Channel.UNLIMITED)
     private val pendingGoto = Channel<DocPos>(Channel.UNLIMITED)
+    private val pendingFormat = Channel<List<TextEdit>>(Channel.UNLIMITED)
 
     private fun enqueueDiagnostics(params: PublishDiagnosticsParams) {
         pendingDiagnostics.trySend(params)
@@ -94,32 +95,34 @@ class LspEditor(
         private set
     private var completionItems: List<CompletionItem> = emptyList()
     private var completionSelected = 0
+    private var lastScrollSelected = -1
     private var completionAnchor: DocPos? = null
     private var completionRequestSeq = 0L
     private var completionRequest: Job? = null
+    @Volatile
+    private var completionDirty = false
+
+    /**
+     * While accepting a completion the replacement edit flows through
+     * onTextChange like any other edit; without this flag the inserted text
+     * (which ends in an identifier character) would re-trigger the popup
+     * right after it was accepted.
+     */
+    private var suppressCompletionTrigger = false
 
     private var semanticTokenRequest: Job? = null
     private var semanticSpans: MutableMap<Int, List<TokenSpan>>? = null
-
-    /**
-     * Monotonic sequence numbers for the debounced refresh requests. A result
-     * is only applied when its sequence is still current: cancellation alone
-     * cannot be trusted to stop an in-flight round trip, so a superseded
-     * response must be dropped instead of overwriting a newer one.
-     */
     @Volatile
-    private var semanticTokenSeq = 0L
+    private var semanticTokenDirty = false
 
     private var inlayHintRequest: Job? = null
     private var inlayHints: MutableMap<Int, List<EditorInlayHint>>? = null
-
     @Volatile
-    private var inlayHintSeq = 0L
+    private var inlayHintDirty = false
 
     private var foldingRequest: Job? = null
-
     @Volatile
-    private var foldingSeq = 0L
+    private var foldingDirty = false
 
     /** Callbacks for UI status (e.g. server messages). */
     var onShowMessage: ((String) -> Unit)? = null
@@ -240,6 +243,11 @@ class LspEditor(
      * pop the popup open *after* the space dismissed it.
      */
     private fun maybeTriggerCompletion(ops: List<cn.enaium.lsp.edit.EditOp>) {
+        if (suppressCompletionTrigger) {
+            completionRequestSeq++
+            closeCompletion()
+            return
+        }
         val last = ops.lastOrNull()
         if (last == null || !last.insert || last.text.isEmpty()) {
             completionRequestSeq++
@@ -281,6 +289,10 @@ class LspEditor(
         while (true) {
             val goto = pendingGoto.tryReceive().getOrNull() ?: break
             editor.setCursor(goto)
+        }
+        while (true) {
+            val edits = pendingFormat.tryReceive().getOrNull() ?: break
+            applyFormatEdits(edits)
         }
     }
 
@@ -375,33 +387,40 @@ class LspEditor(
      * for Ctrl+Space.
      */
     fun requestCompletion() {
-        val pos = editor.cursor
-        completionRequestSeq++
-        val seq = completionRequestSeq
-        // One request per typing burst: without debouncing, every keystroke
-        // queues another request on the server, which stalls completion as
-        // soon as the server gets busy (compiling etc.).
-        completionRequest?.cancel()
+        completionDirty = true
+        if (completionRequest?.isActive == true) return
         completionRequest = scope.launch {
-            delay(150) // debounce
-            val result = client.completion(uri, LspClient.toPosition(pos))
-            if (seq != completionRequestSeq) return@launch
-            val items = when (result) {
-                is CompletionResult.Items -> result.value
-                is CompletionResult.ListValue -> result.value.items
-                else -> emptyList()
+            while (completionDirty) {
+                delay(150) // debounce every iteration (see semantic tokens)
+                completionDirty = false
+                val pos = editor.cursor
+                completionRequestSeq++
+                val seq = completionRequestSeq
+                val result = client.completion(uri, LspClient.toPosition(pos))
+                if (seq != completionRequestSeq) {
+                    // Dismissed (non-identifier edit) while in flight: do
+                    // not open the popup.
+                    if (!completionDirty) break
+                    continue
+                }
+                val items = when (result) {
+                    is CompletionResult.Items -> result.value
+                    is CompletionResult.ListValue -> result.value.items
+                    else -> emptyList()
+                }
+                if (items.isEmpty()) {
+                    completionActive = false
+                    continue
+                }
+                completionItems = items
+                completionSelected = 0
+                lastScrollSelected = -1
+                // Anchor at the current cursor: when typing more identifier
+                // characters the popup stays open and the anchor tracks the
+                // caret, so an accept replaces the whole typed prefix.
+                completionAnchor = pos
+                completionActive = true
             }
-            if (items.isEmpty()) {
-                completionActive = false
-                return@launch
-            }
-            completionItems = items
-            completionSelected = 0
-            // Anchor at the current cursor: when typing more identifier
-            // characters the popup stays open and the anchor tracks the
-            // caret, so an accept replaces the whole typed prefix.
-            completionAnchor = pos
-            completionActive = true
         }
     }
 
@@ -473,6 +492,13 @@ class LspEditor(
         if (ImGui.isKeyPressed(ImGuiKey.DOWN_ARROW)) {
             completionSelected = (completionSelected + 1) % completionItems.size
         }
+        // Scroll the selected item into view only when the selection moved
+        // (keyboard navigation). When the user wheels through the list the
+        // selection is unchanged, so the scroll position must be left alone
+        // — forcing it every frame would yank the list back to the selected
+        // item and make the scrollbar unusable.
+        val selectionMoved = completionSelected != lastScrollSelected
+        lastScrollSelected = completionSelected
         if (ImGui.isKeyPressed(ImGuiKey.ENTER) || ImGui.isKeyPressed(ImGuiKey.TAB)) {
             val item = completionItems.getOrNull(completionSelected)
             if (item != null) {
@@ -509,7 +535,7 @@ class LspEditor(
                 ImGui.end()
                 return
             }
-            if (selected) ImGui.setScrollHereY(0.5f)
+            if (selected && selectionMoved) ImGui.setScrollHereY(0.5f)
         }
         ImGui.end()
     }
@@ -536,8 +562,13 @@ class LspEditor(
             if (c.isLetterOrDigit() || c == '_') start-- else break
         }
         val rangeStart = DocPos(pos.line, start)
-        editor.eraseRange(rangeStart, pos)
-        editor.insertText(rangeStart, insert)
+        suppressCompletionTrigger = true
+        try {
+            editor.eraseRange(rangeStart, pos)
+            editor.insertText(rangeStart, insert)
+        } finally {
+            suppressCompletionTrigger = false
+        }
         closeCompletion()
     }
 
@@ -566,23 +597,74 @@ class LspEditor(
         }
     }
 
+    // ==================== Formatting ====================
+
+    /** Requests document formatting and applies the edits when they arrive. */
+    fun formatDocument() {
+        scope.launch {
+            val edits = client.formatting(uri) ?: return@launch
+            pendingFormat.trySend(edits)
+        }
+    }
+
+    /** Applies server formatting edits on the render thread. */
+    private fun applyFormatEdits(edits: List<TextEdit>) {
+        if (edits.isEmpty()) return
+        closeCompletion()
+        // Apply bottom-up so earlier ranges stay valid. Each edit goes
+        // through the editor's normal ops (which invalidate caches and
+        // notify onTextChange → didChange). Completion is suppressed: the
+        // formatted text ends in identifier characters and must not pop
+        // the completion list open after formatting.
+        val sorted = edits.sortedWith(
+            compareByDescending<TextEdit> { it.range.start.line }
+                .thenByDescending { it.range.start.character },
+        )
+        suppressCompletionTrigger = true
+        try {
+            for (e in sorted) {
+                val start = LspClient.toDocPos(e.range.start)
+                val end = LspClient.toDocPos(e.range.end)
+                if (e.newText.isEmpty()) {
+                    editor.eraseRange(start, end)
+                } else if (start == end) {
+                    editor.insertText(start, e.newText)
+                } else {
+                    editor.eraseRange(start, end)
+                    editor.insertText(start, e.newText)
+                }
+            }
+        } finally {
+            suppressCompletionTrigger = false
+        }
+    }
+
     // ==================== Semantic tokens ====================
 
-    /** Requests full-document semantic tokens when the server supports them. */
+    /**
+     * Requests full-document semantic tokens when the server supports them.
+     * Requests are coalesced: while one is in flight, newer edits only mark
+     * the refresh dirty and a single follow-up runs after it completes —
+     * firing one request per edit would flood the server and wedge it.
+     */
     private fun requestSemanticTokens() {
         val caps = serverCapabilities ?: return
         if (caps.semanticTokensProvider == null) return
-        semanticTokenRequest?.cancel()
-        semanticTokenSeq++
-        val seq = semanticTokenSeq
+        semanticTokenDirty = true
+        if (semanticTokenRequest?.isActive == true) return
         semanticTokenRequest = scope.launch {
-            delay(250) // debounce
-            val tokens = client.semanticTokensFull(uri) ?: return@launch
-            // Drop a response that was superseded by a newer edit: the cancel
-            // above cannot stop a round trip already in flight.
-            if (seq != semanticTokenSeq) return@launch
-            semanticSpans = decodeSemanticTokens(tokens, caps.semanticTokensProvider!!.legend)
-            editor.invalidateAll()
+            while (semanticTokenDirty) {
+                // Debounce EVERY iteration: while edits keep arriving the
+                // refresh waits for a quiet gap, so requests never fire
+                // back-to-back and flood the server during edit storms.
+                delay(250)
+                semanticTokenDirty = false
+                val tokens = client.semanticTokensFull(uri) ?: continue
+                if (!semanticTokenDirty) {
+                    semanticSpans = decodeSemanticTokens(tokens, caps.semanticTokensProvider!!.legend)
+                    editor.invalidateAll()
+                }
+            }
         }
     }
 
@@ -638,32 +720,29 @@ class LspEditor(
 
     // ==================== Folding ====================
 
-    /** Requests foldable ranges when the server supports them. */
+    /**
+     * Requests foldable ranges when the server supports them (coalesced like
+     * semantic tokens). The longer debounce lets the server's snapshot
+     * commit land before the request fires.
+     */
     private fun requestFoldingRanges() {
         val caps = serverCapabilities ?: return
         if (caps.foldingRangeProvider == null) return
-        foldingRequest?.cancel()
-        foldingSeq++
-        val seq = foldingSeq
+        foldingDirty = true
+        if (foldingRequest?.isActive == true) return
         foldingRequest = scope.launch {
-            // Longer debounce than the other refreshes: folding is computed
-            // from the server's asynchronously-committed document snapshot
-            // (IntelliJ-based servers run it in a readAction), so a request
-            // fired the moment typing stops can still be answered from the
-            // pre-edit snapshot. Waiting a second lets the commit land.
-            // The request is given a generous timeout instead of being
-            // dropped and re-issued: retry loops flood the server and make
-            // it stall for every other request (completion, hover, ...).
-            delay(1_000) // debounce
-            val ranges = try {
-                withTimeout(30_000) { client.foldingRange(uri) }
-            } catch (e: TimeoutCancellationException) {
-                null // server did not answer in time; the next edit re-issues
+            while (foldingDirty) {
+                delay(1_000) // debounce every iteration (see semantic tokens)
+                foldingDirty = false
+                val ranges = try {
+                    withTimeout(30_000) { client.foldingRange(uri) }
+                } catch (e: TimeoutCancellationException) {
+                    null // server did not answer in time; retry if dirty
+                }
+                if (ranges != null && !foldingDirty) {
+                    applyFoldingRanges(ranges.map { EditorFoldRange(it.startLine, it.endLine) })
+                }
             }
-            // Drop a response superseded by a newer request.
-            if (seq != foldingSeq) return@launch
-            if (ranges == null) return@launch
-            applyFoldingRanges(ranges.map { EditorFoldRange(it.startLine, it.endLine) })
         }
     }
 
@@ -684,27 +763,29 @@ class LspEditor(
 
     // ==================== Inlay hints ====================
 
-    /** Requests inlay hints for the whole document when supported. */
+    /** Requests inlay hints for the whole document when supported (coalesced like semantic tokens). */
     private fun requestInlayHints() {
         val caps = serverCapabilities ?: return
         if (caps.inlayHintProvider == null) return
-        inlayHintRequest?.cancel()
-        inlayHintSeq++
-        val seq = inlayHintSeq
+        inlayHintDirty = true
+        if (inlayHintRequest?.isActive == true) return
         inlayHintRequest = scope.launch {
-            delay(250) // debounce
-            val lineCount = editor.lineCount()
-            if (lineCount == 0) return@launch
-            val endLine = lineCount - 1
-            val range = Range(
-                start = Position(0, 0),
-                end = Position(endLine, editor.buffer.line(endLine).length),
-            )
-            val hints = client.inlayHint(uri, range) ?: return@launch
-            // Drop a response that was superseded by a newer edit.
-            if (seq != inlayHintSeq) return@launch
-            inlayHints = decodeInlayHints(hints)
-            editor.invalidateAll()
+            while (inlayHintDirty) {
+                delay(250) // debounce every iteration (see semantic tokens)
+                inlayHintDirty = false
+                val lineCount = editor.lineCount()
+                if (lineCount == 0) continue
+                val endLine = lineCount - 1
+                val range = Range(
+                    start = Position(0, 0),
+                    end = Position(endLine, editor.buffer.line(endLine).length),
+                )
+                val hints = client.inlayHint(uri, range) ?: continue
+                if (!inlayHintDirty) {
+                    inlayHints = decodeInlayHints(hints)
+                    editor.invalidateAll()
+                }
+            }
         }
     }
 

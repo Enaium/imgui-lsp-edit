@@ -94,6 +94,13 @@ class Editor(
     var tabSize: Int = 4
     var showLineNumbers: Boolean = true
     var showWhitespace: Boolean = true
+
+    /**
+     * When true, leading indentation is visualized: spaces draw as dots and
+     * tabs draw as horizontal lines at the bottom of the line (a separate
+     * option from [showWhitespace], which draws every whitespace run).
+     */
+    var showIndentGuides: Boolean = false
     var showMinimap: Boolean = true
     /** Minimap strip width in pixels. */
     var minimapWidth: Float = 96f
@@ -146,6 +153,17 @@ class Editor(
      * mapping stay consistent.
      */
     var inlayHintFont: ImFont? = null
+
+    /**
+     * Font used to render and measure the text. When set, the font is pushed
+     * for the whole [render] pass so glyphs, widths and the caret all agree.
+     * Font fallback is done at the ImGui atlas level (the colortextedit
+     * approach): build the font with a fallback font merged in
+     * (`ImFontConfig(mergeMode = true)`), and missing glyphs render from the
+     * fallback automatically. Null keeps the ImGui current font.
+     */
+    var font: ImFont? = null
+    private var lastFont: ImFont? = null
 
     // ---- folding state ----
     /** Collapsible ranges (may nest). Set via [setFoldRanges]. */
@@ -532,6 +550,8 @@ class Editor(
     ): Boolean {
         val id = if (title.isEmpty()) "##editor$uniqueId" else title
         ImGui.beginChild(id, size, childFlags, windowFlags or ImGuiWindowFlags.HORIZONTAL_SCROLLBAR)
+        val pushedFont = font
+        if (pushedFont != null) ImGui.pushFont(pushedFont)
 
         isFocused = ImGui.isWindowFocused() || ImGui.isWindowHovered()
         if (isFocused) {
@@ -578,9 +598,13 @@ class Editor(
         overlay?.invoke()
 
         // Extend the child window's scrollable region to the content size.
-        ImGui.setCursorPos(ImVec2(contentWidth, contentHeight))
+        // The dummy sits one pixel INSIDE the content rect: a 1x1 dummy at
+        // exactly contentHeight would extend the scroll range by 1px and
+        // leave a tiny always-scrollable strip at the bottom.
+        ImGui.setCursorPos(ImVec2(contentWidth, (contentHeight - 1f).coerceAtLeast(0f)))
         ImGui.dummy(ImVec2(1f, 1f))
 
+        if (pushedFont != null) ImGui.popFont()
         ImGui.endChild()
         return isFocused
     }
@@ -603,8 +627,9 @@ class Editor(
         viewWidth = (avail.x - if (showMinimap) minimapWidth else 0f).coerceAtLeast(0f)
         viewHeight = avail.y
         val newFontGeneration = ImGui.getFontSize()
-        if (newFontGeneration != fontGeneration) {
+        if (newFontGeneration != fontGeneration || font !== lastFont) {
             fontGeneration = newFontGeneration
+            lastFont = font
             lineWidthCache.clear()
         }
         gutterWidth = if (showLineNumbers) {
@@ -627,7 +652,10 @@ class Editor(
         }
         contentWidth = max(avail.x, gutterWidth + maxLineWidth + 8f)
         rebuildFoldsIfDirty()
-        contentHeight = max(avail.y, lineHeight * visibleLineCount + 20f)
+        // No bottom padding: when the lines exactly fill the viewport the
+        // scroll range must be zero, otherwise the window shows a small
+        // useless vertical scroll (content = viewport + padding).
+        contentHeight = max(avail.y, lineHeight * visibleLineCount)
     }
 
     /**
@@ -741,6 +769,9 @@ class Editor(
     /** Test hook: whether a soft (down-only) scroll-follow is pending. */
     internal val scrollFollowSoftForTest: Boolean get() = scrollFollowSoft
 
+    /** Test hook: measured content height (valid after a render). */
+    internal val contentHeightForTest: Float get() = contentHeight
+
     /**
      * Scrolls the child window so the cursor stays visible after keyboard
      * movement or editing (scroll-follow). With [followUp] false (edits),
@@ -840,16 +871,26 @@ class Editor(
 
         // Hover: fire after the pointer rests on a position for 0.3s; each
         // position fires at most once until the mouse moves elsewhere.
-        val hoverChanged = lastHoverPos != pos
-        val now = ImGui.getTime()
-        if (hoverChanged) {
-            lastHoverPos = pos
-            hoverStillStartTime = now
-            hoverFired = false
-            hoverSuppressed = false
-        } else if (onHover != null && !hoverFired && !hoverSuppressed && now - hoverStillStartTime > 0.3) {
-            onHover?.invoke(pos)
-            hoverFired = true
+        // Only hover while the pointer is on an actual (non-whitespace)
+        // character: past the end of the line the column mapping reports
+        // the last column, which would otherwise stretch the last word's
+        // hover zone to the line end.
+        val lineText = buffer.line(line)
+        val onChar = pos.index < lineText.length && !lineText[pos.index].isWhitespace()
+        if (!onChar) {
+            endHover()
+        } else {
+            val hoverChanged = lastHoverPos != pos
+            val now = ImGui.getTime()
+            if (hoverChanged) {
+                lastHoverPos = pos
+                hoverStillStartTime = now
+                hoverFired = false
+                hoverSuppressed = false
+            } else if (onHover != null && !hoverFired && !hoverSuppressed && now - hoverStillStartTime > 0.3) {
+                onHover?.invoke(pos)
+                hoverFired = true
+            }
         }
 
         // Markers: line-number tooltip in the gutter, text tooltip over the
@@ -1138,7 +1179,13 @@ class Editor(
      * multi-line comments/strings stay correct after edits anywhere above.
      */
     fun spansOf(line: Int): List<TokenSpan> {
-        tokenProvider?.invoke(line)?.let { return it }
+        // When an external token provider (e.g. LSP semantic tokens) is
+        // installed, it owns highlighting entirely: lines without tokens
+        // render as plain text. Falling back to the built-in regex
+        // highlighter would paint keywords/strings with editor colors that
+        // conflict with the server's tokens.
+        val provider = tokenProvider
+        if (provider != null) return provider(line) ?: emptyList()
         lineSpans[line]?.let { return it }
 
         // Find the nearest earlier line whose carry state is still cached,
@@ -1237,11 +1284,39 @@ class Editor(
         // Text + selection. Spans may be stale (semantic tokens from before
         // the last edit), so clamp them to the current line length.
         val selection = selectionBounds()
+        val wsColor = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
         for (row in firstRow..lastRow) {
             val line = visibleDocLines[row]
             val text = buffer.line(line)
             if (text.isEmpty()) continue
             val y = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+
+            // Indent guides: leading spaces as dots, leading tabs as
+            // horizontal lines at the bottom of the line.
+            if (showIndentGuides) {
+                var gi = 0
+                while (gi < text.length && (text[gi] == ' ' || text[gi] == '\t')) {
+                    val gx = textStartX - scrollX + lineAdvance(line, gi)
+                    if (text[gi] == ' ') {
+                        drawList.DrawCircleFilled(
+                            ImVec2(gx + charWidth / 2f, y + lineHeight / 2f),
+                            charWidth * 0.12f,
+                            wsColor,
+                        )
+                    } else {
+                        // Tab: line from this column to the next tab stop.
+                        val tabEnd = textStartX - scrollX + lineAdvance(line, gi + 1)
+                        drawList.DrawLine(
+                            ImVec2(gx, y + lineHeight - 2f),
+                            ImVec2(tabEnd - 1f, y + lineHeight - 2f),
+                            wsColor,
+                            1f,
+                        )
+                    }
+                    gi++
+                }
+            }
+
             val spans = spansOf(line)
             val len = text.length
 
@@ -1270,9 +1345,12 @@ class Editor(
                     hintIdx++
                 }
                 // Text chunk [pos, bp) with the span palette covering bp.
+                // A marker's textColor (e.g. unified-diff red/green) wins
+                // over syntax colors so whole lines can be tinted.
                 if (pos < bp) {
                     val span = spans.firstOrNull { pos >= it.start && bp <= it.end }
-                    val color = palette[span?.palette ?: PaletteIndex.TEXT]
+                    val base = palette[span?.palette ?: PaletteIndex.TEXT]
+                    val color = markers[line]?.textColor ?: base
                     x += drawSegment(drawList, line, text, pos, bp, x, y, color, selection)
                 }
                 pos = bp

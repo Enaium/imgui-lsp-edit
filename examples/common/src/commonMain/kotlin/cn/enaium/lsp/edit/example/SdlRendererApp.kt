@@ -36,6 +36,10 @@ object SdlRendererApp {
         // so hosts can e.g. size inlay hints smaller than the main font.
         // 0 disables the extra font.
         extraFontSizePx: Float = 0f,
+        // TTF/OTF/TTC file merged into the main font with mergeMode=true:
+        // glyphs the main font lacks (CJK, symbols, ...) render from this
+        // fallback automatically. Null disables the fallback.
+        fallbackFontPath: String? = null,
         // SDL_TextInput goes both to imgui's IO queue and to this callback.
         // Return true to consume the event (the widget already handled it).
         onTextInput: (String) -> Boolean = { false },
@@ -75,6 +79,21 @@ object SdlRendererApp {
                             rasterizerDensity = density,
                         ),
                     )
+                    if (fallbackFontPath != null) {
+                        val fallback = fonts.addFontFromFileTTF(
+                            fallbackFontPath,
+                            ImFontConfig(
+                                sizePixels = 13f * density,
+                                mergeMode = true,
+                                rasterizerDensity = density,
+                            ),
+                        )
+                        if (fallback != null) {
+                            println("merged fallback font: $fallbackFontPath")
+                        } else {
+                            println("fallback font not loaded: $fallbackFontPath")
+                        }
+                    }
                     val extraFont =
                         if (extraFontSizePx > 0f) {
                             fonts.addFontDefault(
@@ -95,6 +114,9 @@ object SdlRendererApp {
 
                     var running = true
                     var frameCount = 0
+                    // Hide the OS cursor while typing, restore it when the
+                    // mouse moves again (IDE behavior).
+                    var cursorVisible = true
                     while (running && frameCount < frames) {
                         while (true) {
                             val event = SDL.pollEvent() ?: break
@@ -102,6 +124,20 @@ object SdlRendererApp {
                                 is cn.enaium.sdl.SDLEvent.Quit -> running = false
                                 is cn.enaium.sdl.SDLEvent.Window ->
                                     if (event.type == cn.enaium.sdl.SDLWindowEventType.CLOSE_REQUESTED) running = false
+                                is cn.enaium.sdl.SDLEvent.Key -> {
+                                    if (event.down && !event.repeat && cursorVisible) {
+                                        SDL.hideCursor()
+                                        cursorVisible = false
+                                    }
+                                    imgui.processEvent(event)
+                                }
+                                is cn.enaium.sdl.SDLEvent.MouseMotion, is cn.enaium.sdl.SDLEvent.MouseButton -> {
+                                    if (!cursorVisible) {
+                                        SDL.showCursor()
+                                        cursorVisible = true
+                                    }
+                                    imgui.processEvent(event)
+                                }
                                 is cn.enaium.sdl.SDLEvent.TextInput -> {
                                     // The editor reads characters from the host
                                     // (the Kotlin IO binding has no queue reader).
