@@ -143,6 +143,15 @@ object SdlRendererApp {
                                     // (the Kotlin IO binding has no queue reader).
                                     if (!onTextInput(event.text)) imgui.processEvent(event)
                                 }
+                                is cn.enaium.sdl.SDLEvent.MouseWheel -> {
+                                    // imgui convention: positive MouseWheelH scrolls
+                                    // content LEFT. Natural trackpad gestures produce
+                                    // positive SDL x for a leftward swipe, so the
+                                    // content must scroll RIGHT — invert the x axis.
+                                    // The backend's processEvent would forward the
+                                    // raw x; forward the inverted pair ourselves.
+                                    ImGui.getIO().addMouseWheelEvent(-event.x, event.y)
+                                }
                                 else -> imgui.processEvent(event)
                             }
                         }
