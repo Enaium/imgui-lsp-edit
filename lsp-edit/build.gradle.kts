@@ -58,6 +58,26 @@ kotlin {
             implementation(libs.imgui.kmp)
             implementation(libs.lsp.kmp)
         }
+        // Tree-sitter parsing core (Maven Central); language grammars are
+        // supplied by the host (e.g. tree-sitter-languages-kmp). ktreesitter
+        // publishes for jvm/android/macos/linux/mingw/ios(arm64+simulator)
+        // only, so the tree-sitter highlighter lives in its own source set
+        // that those targets depend on (iosX64/tvos/watchos stay out).
+        val treesitterMain by creating {
+            dependsOn(commonMain.get())
+            dependencies {
+                implementation("io.github.tree-sitter:ktreesitter:0.25.1")
+            }
+        }
+        jvmMain.get().dependsOn(treesitterMain)
+        macosArm64Main.get().dependsOn(treesitterMain)
+        macosX64Main.get().dependsOn(treesitterMain)
+        linuxX64Main.get().dependsOn(treesitterMain)
+        linuxArm64Main.get().dependsOn(treesitterMain)
+        mingwX64Main.get().dependsOn(treesitterMain)
+        iosArm64Main.get().dependsOn(treesitterMain)
+        iosSimulatorArm64Main.get().dependsOn(treesitterMain)
+        androidMain.get().dependsOn(treesitterMain)
         commonTest.dependencies {
             implementation(kotlin("test"))
             implementation(libs.kotlinx.coroutines.test)
