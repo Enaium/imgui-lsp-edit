@@ -297,6 +297,13 @@ class Editor(
      */
     var keysReservedByOverlay: (() -> Boolean)? = null
 
+    /**
+     * Optional hook invoked INSIDE the editor's right-click context menu
+     * (after the built-in clipboard items). Hosts append LSP actions such
+     * as Go to Definition / Rename here.
+     */
+    var onContextMenu: (() -> Unit)? = null
+
     private var _findString = ""
     private var lastFindPos: DocPos? = null
 
@@ -617,6 +624,7 @@ class Editor(
         }
         drawText()
 
+        renderContextMenu()
         overlay?.invoke()
 
         // Extend the child window's scrollable region to the content size.
@@ -1229,6 +1237,24 @@ class Editor(
             state = result.carryState
         }
         return lineSpans[line]!!
+    }
+
+    // ==================== Context menu ====================
+
+    /** Renders the editor's right-click menu (clipboard + host extensions). */
+    private fun renderContextMenu() {
+        if (!ImGui.beginPopupContextWindow("##editorCtx$uniqueId", 0)) return
+        val hasSel = hasSelection()
+        if (ImGui.menuItem("Cut", "Ctrl+X", false, hasSel)) cut()
+        if (ImGui.menuItem("Copy", "Ctrl+C", false, hasSel)) copy()
+        if (ImGui.menuItem("Paste", "Ctrl+V")) paste()
+        ImGui.separator()
+        if (ImGui.menuItem("Select All", "Ctrl+A")) selectAll()
+        ImGui.separator()
+        if (ImGui.menuItem("Undo", "Ctrl+Z", false, canUndo())) undo()
+        if (ImGui.menuItem("Redo", "Ctrl+Shift+Z", false, canRedo())) redo()
+        onContextMenu?.invoke()
+        ImGui.endPopup()
     }
 
     // ==================== Drawing ====================
