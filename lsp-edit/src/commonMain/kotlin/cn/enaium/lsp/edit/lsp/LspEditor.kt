@@ -399,7 +399,14 @@ class LspEditor(
         // tooltip to a minimum width so lines break at a readable measure.
         ImGui.setNextWindowSizeConstraints(ImVec2(320f, 0f), ImVec2(Float.MAX_VALUE, Float.MAX_VALUE))
         ImGui.beginTooltip()
-        Markdown.render(markdownConfig, text)
+        // Fenced code blocks in hover markdown render as read-only,
+        // syntax-highlighted blocks (theme palette, no line numbers).
+        cn.enaium.lsp.edit.MarkdownCode.render(
+            markdownConfig,
+            text,
+            language = editor.language,
+            palette = editor.palette,
+        )
         ImGui.endTooltip()
     }
 
