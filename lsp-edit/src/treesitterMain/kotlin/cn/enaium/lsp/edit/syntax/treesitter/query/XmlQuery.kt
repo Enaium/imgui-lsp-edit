@@ -16,5 +16,7 @@ object XmlQuery {
 |(Comment) @comment
 |(doctypedecl) @keyword
 |(XMLDecl) @keyword
+|(XMLDecl (VersionNum) @string)
+|(XMLDecl (EncName) @string)
 """.trimMargin()
 }
