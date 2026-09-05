@@ -127,6 +127,14 @@ class Editor(
     var markers: MutableMap<Int, EditorMarker> = LinkedHashMap()
 
     var isFocused: Boolean = false
+
+    /**
+     * True only when the editor's child window has actual keyboard focus
+     * (a click landed on it), unlike [isFocused] which also counts hover.
+     * Hosts use this to toggle platform text input without popping the
+     * system IME while the mouse merely passes over the editor.
+     */
+    var isFocusedStrict: Boolean = false
         private set
 
     // ---- callbacks ----
@@ -566,7 +574,8 @@ class Editor(
         val pushedFont = font
         if (pushedFont != null) ImGui.pushFont(pushedFont)
 
-        isFocused = ImGui.isWindowFocused() || ImGui.isWindowHovered()
+        isFocusedStrict = ImGui.isWindowFocused()
+        isFocused = isFocusedStrict || ImGui.isWindowHovered()
         if (isFocused) {
             ImGui.setNextFrameWantCaptureKeyboard(true)
             ImGui.setNextFrameWantCaptureMouse(false)
