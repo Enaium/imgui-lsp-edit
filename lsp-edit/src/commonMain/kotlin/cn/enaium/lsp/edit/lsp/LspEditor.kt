@@ -3,12 +3,14 @@ package cn.enaium.lsp.edit.lsp
 import cn.enaium.imgui.ImGui
 import cn.enaium.imgui.ImGuiKey
 import cn.enaium.imgui.ImVec2
+import cn.enaium.imgui.ImVec4
 import cn.enaium.imgui.extensions.markdown.Markdown
 import cn.enaium.imgui.extensions.markdown.MarkdownConfigHandle
 import cn.enaium.imgui.extensions.markdown.MdFormatFlags
 import cn.enaium.lsp.model.*
 import cn.enaium.lsp.edit.DocPos
 import cn.enaium.lsp.edit.Editor
+import cn.enaium.lsp.edit.EditorCodeLens
 import cn.enaium.lsp.edit.EditorFoldRange
 import cn.enaium.lsp.edit.EditorInlayHint
 import cn.enaium.lsp.edit.PaletteIndex
@@ -124,6 +126,33 @@ class LspEditor(
     @Volatile
     private var foldingDirty = false
 
+    // ---- code lenses ----
+    private var codeLensRequest: Job? = null
+    @Volatile
+    private var codeLensDirty = false
+    private var codeLenses: MutableMap<Int, List<Pair<CodeLens, EditorCodeLens>>>? = null
+
+    /** Host hook: a code lens was clicked; receives its raw LSP command. */
+    var onCodeLensCommand: ((CodeLens, Command?) -> Unit)? = null
+
+    // ---- signature help ----
+    private var signatureRequest: Job? = null
+    @Volatile
+    private var signatureResult: SignatureHelp? = null
+    @Volatile
+    private var signaturePosition: DocPos? = null
+    @Volatile
+    private var signatureInFlight = false
+
+    /** Host hook: document symbol tree refreshed (for structure panels). */
+    var onDocumentSymbols: ((List<DocumentSymbol>) -> Unit)? = null
+
+    /** Host hook: references resolved for a symbol (for reference panels). */
+    var onReferences: ((List<Location>) -> Unit)? = null
+
+    /** Host hook: rename workspace edit resolved (host applies it). */
+    var onRename: ((WorkspaceEdit) -> Unit)? = null
+
     /** Callbacks for UI status (e.g. server messages). */
     var onShowMessage: ((String) -> Unit)? = null
     var onLogMessage: ((String) -> Unit)? = null
@@ -176,6 +205,8 @@ class LspEditor(
         }
         editor.tokenProvider = ::semanticTokenSpansFor
         editor.inlayHintsProvider = ::inlayHintsFor
+        editor.codeLensProvider = ::codeLensesFor
+        editor.onCodeLensClick = ::handleCodeLensClick
         // While the completion popup is open, Up/Down/Enter/Tab navigate and
         // accept in the popup instead of moving the caret / editing.
         editor.keysReservedByOverlay = { completionActive }
@@ -193,6 +224,8 @@ class LspEditor(
         inlayHints = null
         requestInlayHints()
         requestFoldingRanges()
+        requestCodeLenses()
+        requestDocumentSymbols()
     }
 
     /** Sends didClose. */
@@ -233,6 +266,8 @@ class LspEditor(
         requestSemanticTokens()
         requestInlayHints()
         requestFoldingRanges()
+        requestCodeLenses()
+        requestDocumentSymbols()
     }
 
     /**
@@ -810,4 +845,226 @@ class LspEditor(
         }
         return result as MutableMap<Int, List<EditorInlayHint>>
     }
+
+    // ==================== Code lenses ====================
+
+    /**
+     * Requests code lenses when the server supports them (coalesced like
+     * semantic tokens). Lenses without a command are resolved individually
+     * so clicks can dispatch the server command.
+     */
+    private fun requestCodeLenses() {
+        val caps = serverCapabilities ?: return
+        if (caps.codeLensProvider == null) return
+        codeLensDirty = true
+        if (codeLensRequest?.isActive == true) return
+        codeLensRequest = scope.launch {
+            while (codeLensDirty) {
+                delay(400) // debounce every iteration (see semantic tokens)
+                codeLensDirty = false
+                val lenses = client.codeLens(uri) ?: continue
+                if (!codeLensDirty) {
+                    codeLenses = decodeCodeLenses(lenses)
+                    editor.invalidateAll()
+                }
+            }
+        }
+    }
+
+    /** Returns the code lenses for [line], or null to render none. */
+    private fun codeLensesFor(line: Int): List<EditorCodeLens>? {
+        val lineLenses = codeLenses?.get(line) ?: return null
+        return lineLenses.map { it.second }
+    }
+
+    private fun decodeCodeLenses(lenses: List<CodeLens>): MutableMap<Int, List<Pair<CodeLens, EditorCodeLens>>> {
+        val result = HashMap<Int, MutableList<Pair<CodeLens, EditorCodeLens>>>()
+        for (l in lenses) {
+            val title = l.command?.title ?: continue
+            if (title.isEmpty()) continue
+            result.getOrPut(l.range.start.line) { mutableListOf() }
+                .add(l to EditorCodeLens(l.range.start.line, title, l.command?.command))
+        }
+        return result as MutableMap<Int, List<Pair<CodeLens, EditorCodeLens>>>
+    }
+
+    /** Handles a code lens click: resolves missing commands, dispatches. */
+    private fun handleCodeLensClick(lens: EditorCodeLens) {
+        val raw = codeLenses?.values?.flatten()?.firstOrNull {
+            it.second === lens
+        }?.first ?: return
+        if (raw.command != null) {
+            onCodeLensCommand?.invoke(raw, raw.command)
+            return
+        }
+        // Resolve the lens to fill its command.
+        scope.launch {
+            val resolved = client.codeLensResolve(raw) ?: return@launch
+            if (resolved.command != null) {
+                onCodeLensCommand?.invoke(resolved, resolved.command)
+            }
+        }
+    }
+
+    // ==================== Signature help ====================
+
+    /** Requests signature help at the cursor (debounced). */
+    fun requestSignatureHelp() {
+        val caps = serverCapabilities ?: return
+        if (caps.signatureHelpProvider == null) return
+        signatureRequest?.cancel()
+        signatureRequest = scope.launch {
+            delay(200) // debounce: let the caret settle after typing
+            val pos = editor.cursor
+            signatureRequestSeq++
+            val seq = signatureRequestSeq
+            val result = client.signatureHelp(uri, LspClient.toPosition(pos))
+            if (seq == signatureRequestSeq) {
+                signatureResult = result
+                signaturePosition = pos
+                signatureInFlight = false
+            }
+        }
+        signatureInFlight = true
+    }
+
+    private var signatureRequestSeq = 0L
+
+    /** Renders the signature help popup near the caret (called after editor render). */
+    fun renderSignatureHelp() {
+        val h = signatureResult ?: return
+        if (h.signatures.isEmpty()) return
+        val sig = h.signatures.getOrNull(h.activeSignature ?: 0) ?: return
+        val x = editor.caretScreenX()
+        val y = editor.caretScreenY()
+        ImGui.setNextWindowPos(ImVec2(x, y - editor.lineHeightPx() * 2.2f))
+        ImGui.setNextWindowSizeConstraints(
+            ImVec2(320f, 0f),
+            ImVec2(640f, ImGui.getIO().displaySize.y * 0.4f),
+        )
+        ImGui.begin(
+            "##signature${editor.uniqueId}",
+            null,
+            cn.enaium.imgui.ImGuiWindowFlags.NO_TITLE_BAR or
+                cn.enaium.imgui.ImGuiWindowFlags.NO_RESIZE or
+                cn.enaium.imgui.ImGuiWindowFlags.NO_MOVE or
+                cn.enaium.imgui.ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or
+                cn.enaium.imgui.ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
+        val activeParam = h.activeParameter ?: sig.activeParameter ?: 0
+        // Highlight the active parameter inside the label.
+        val label = sig.label
+        val param = sig.parameters?.getOrNull(activeParam)
+        val paramLabel = param?.let { p ->
+            when (val l = p.label) {
+                is ParameterLabel.StringValue -> l.value
+                is ParameterLabel.Offsets -> {
+                    val (s, e) = l.value
+                    label.substring(s.coerceIn(0, label.length), e.coerceIn(0, label.length))
+                }
+                else -> null
+            }
+        }
+        if (paramLabel != null && paramLabel.isNotEmpty()) {
+            val start = label.indexOf(paramLabel)
+            if (start >= 0) {
+                ImGui.text(label.substring(0, start))
+                ImGui.sameLine(0f, 0f)
+                ImGui.pushStyleColor(
+                    cn.enaium.imgui.ImGuiCol.TEXT,
+                    ImVec4(0.9f, 0.75f, 0.48f, 1f),
+                )
+                ImGui.text(paramLabel)
+                ImGui.popStyleColor()
+                ImGui.sameLine(0f, 0f)
+                ImGui.text(label.substring(start + paramLabel.length))
+                ImGui.end()
+                return
+            }
+        }
+        ImGui.textWrapped(label)
+        ImGui.end()
+    }
+
+    // ==================== Document symbols ====================
+
+    /** Requests the document symbol tree (coalesced). */
+    private fun requestDocumentSymbols() {
+        val caps = serverCapabilities ?: return
+        if (caps.documentSymbolProvider == null) return
+        if (documentSymbolRequest?.isActive == true) return
+        documentSymbolRequest = scope.launch {
+            delay(400)
+            val symbols = client.documentSymbols(uri) ?: return@launch
+            onDocumentSymbols?.invoke(symbols)
+        }
+    }
+
+    private var documentSymbolRequest: Job? = null
+
+    // ==================== References / rename ====================
+
+    /** Requests references for the word under [pos] (or the cursor). */
+    fun requestReferences(pos: DocPos? = null) {
+        val p = pos ?: editor.cursor
+        scope.launch {
+            val locations = client.references(uri, LspClient.toPosition(p)) ?: return@launch
+            onReferences?.invoke(locations)
+        }
+    }
+
+    /** Prepares and executes a rename of the symbol under [pos] to [newName]. */
+    fun requestRename(newName: String, pos: DocPos? = null) {
+        val p = pos ?: editor.cursor
+        scope.launch {
+            val edit = client.rename(uri, LspClient.toPosition(p), newName) ?: return@launch
+            onRename?.invoke(edit)
+        }
+    }
+
+    /** Checks whether the symbol under [pos] can be renamed. */
+    fun canRename(pos: DocPos? = null, onResult: (Boolean) -> Unit) {
+        val p = pos ?: editor.cursor
+        scope.launch {
+            val r = client.prepareRename(uri, LspClient.toPosition(p))
+            onResult(r != null)
+        }
+    }
+
+    /** Requests type definition for the word under [pos]. */
+    fun gotoTypeDefinition(pos: DocPos? = null) {
+        val p = pos ?: editor.cursor
+        scope.launch {
+            val result = client.typeDefinition(uri, LspClient.toPosition(p))
+            val location = when (result) {
+                is LocationResult.Locations -> result.value.firstOrNull()
+                is LocationResult.Links -> result.value.firstOrNull()?.let {
+                    Location(it.targetUri, it.targetRange)
+                }
+                else -> null
+            } ?: return@launch
+            if (location.uri == uri) {
+                enqueueGoto(LspClient.toDocPos(location.range.start))
+            }
+        }
+    }
+
+    /** Requests implementations of the symbol under [pos]. */
+    fun gotoImplementation(pos: DocPos? = null) {
+        val p = pos ?: editor.cursor
+        scope.launch {
+            val result = client.implementation(uri, LspClient.toPosition(p))
+            val location = when (result) {
+                is LocationResult.Locations -> result.value.firstOrNull()
+                is LocationResult.Links -> result.value.firstOrNull()?.let {
+                    Location(it.targetUri, it.targetRange)
+                }
+                else -> null
+            } ?: return@launch
+            if (location.uri == uri) {
+                enqueueGoto(LspClient.toDocPos(location.range.start))
+            }
+        }
+    }
+
 }

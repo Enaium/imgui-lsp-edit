@@ -147,6 +147,16 @@ class Editor(
     var inlayHintsProvider: ((Int) -> List<EditorInlayHint>?)? = null
 
     /**
+     * Provides the code lenses for a document line (or null when none).
+     * Lenses are drawn as dim clickable labels in the line's leading
+     * whitespace (VS Code style); clicks report the lens's command.
+     */
+    var codeLensProvider: ((Int) -> List<EditorCodeLens>?)? = null
+
+    /** Invoked when a code lens label is clicked (with its command or null). */
+    var onCodeLensClick: ((EditorCodeLens) -> Unit)? = null
+
+    /**
      * Font used to render inlay hints (typically a smaller variant of the
      * editor font). When null, hints use the current font. Widths measured
      * with [inlayHintWidth] use the same font so layout, cursor and click
@@ -1288,6 +1298,36 @@ class Editor(
         for (row in firstRow..lastRow) {
             val line = visibleDocLines[row]
             val text = buffer.line(line)
+            // Code lenses render in the line's leading whitespace, before
+            // the text (VS Code style): dim clickable labels.
+            val lenses = codeLensProvider?.invoke(line)
+            if (!lenses.isNullOrEmpty()) {
+                val ly = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+                val mx = ImGui.getMousePos()
+                var lx = textStartX - scrollX
+                for (lens in lenses) {
+                    val w = ImGui.calcTextSize(lens.title).x
+                    val hovered = ImGui.isWindowHovered() &&
+                        mx.x >= lx && mx.x <= lx + w &&
+                        mx.y >= ly && mx.y <= ly + lineHeight
+                    if (hovered) {
+                        drawList.DrawRectFilled(
+                            ImVec2(lx, ly),
+                            ImVec2(lx + w, ly + lineHeight),
+                            0x2A569CD6.toInt(), // translucent selection tint
+                        )
+                    }
+                    drawList.DrawText(
+                        ImVec2(lx, ly),
+                        lens.title,
+                        palette[PaletteIndex.INLAY_HINT].toImGuiColor(),
+                    )
+                    if (hovered && ImGui.isMouseClicked(0)) {
+                        onCodeLensClick?.invoke(lens)
+                    }
+                    lx += w + charWidth * 0.6f
+                }
+            }
             if (text.isEmpty()) continue
             val y = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
 

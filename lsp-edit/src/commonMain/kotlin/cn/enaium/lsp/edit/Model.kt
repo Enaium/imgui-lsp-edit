@@ -106,6 +106,17 @@ data class EditorInlayHint(val position: DocPos, val label: String)
  */
 data class EditorFoldRange(val startLine: Int, val endLine: Int)
 
+/**
+ * A code lens rendered above [line]: [title] is drawn as a dim clickable
+ * label (VS Code style). When [command] is non-null, clicking the lens
+ * invokes it; hosts may also show a context menu.
+ */
+data class EditorCodeLens(
+    val line: Int,
+    val title: String,
+    val command: String? = null,
+)
+
 /** Converts a packed [Color] into the 0xAABBGGRR int imgui draw calls expect. */
 fun Color.toImGuiColor(): Int {
     val a = (this ushr 24) and 0xFF

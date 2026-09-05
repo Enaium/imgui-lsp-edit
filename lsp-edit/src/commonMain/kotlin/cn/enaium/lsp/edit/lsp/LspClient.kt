@@ -14,7 +14,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * An LSP client built on lsp-kmp's `JsonRpcLauncher`. Drives a single
@@ -249,6 +254,329 @@ class LspClient(
 
     /** The server's capabilities, populated after [initialize]. */
     fun getServerCapabilities(): ServerCapabilities? = serverCapabilities
+
+    // ==================== Symbol structure ====================
+
+    /**
+     * Queries the document symbol tree (`textDocument/documentSymbol`).
+     *
+     * The result is either a flat list of [SymbolInformation] (flat mode) or
+     * a nested list of [DocumentSymbol] (hierarchical mode). lsp-kmp's
+     * DocumentSymbolResult serializer mishandles the array form, so the raw
+     * JsonElement is decoded here with the list serializers directly.
+     */
+    suspend fun documentSymbols(uri: String): List<DocumentSymbol>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/documentSymbol",
+                        DocumentSymbolParams(textDocument = TextDocumentIdentifier(uri)),
+                        DocumentSymbolParams.serializer(),
+                        JsonElement.serializer(),
+                    )
+                }
+            }?.let { element ->
+                val arr = element as? kotlinx.serialization.json.JsonArray ?: return null
+                // Hierarchical mode: objects carry "selectionRange".
+                if (arr.any { (it as? kotlinx.serialization.json.JsonObject)?.containsKey("selectionRange") == true }) {
+                    LspJson.json.decodeFromJsonElement(
+                        ListSerializer(DocumentSymbol.serializer()),
+                        element,
+                    )
+                } else {
+                    // Flat mode: convert SymbolInformation list into a shallow
+                    // DocumentSymbol list so callers see one tree shape.
+                    val flat = LspJson.json.decodeFromJsonElement(
+                        ListSerializer(SymbolInformation.serializer()),
+                        element,
+                    )
+                    flat.map {
+                        DocumentSymbol(
+                            name = it.name,
+                            kind = it.kind,
+                            range = it.location.range,
+                            selectionRange = it.location.range,
+                            detail = it.containerName,
+                        )
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Queries code lenses for the document. */
+    suspend fun codeLens(uri: String): List<CodeLens>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/codeLens",
+                        CodeLensParams(textDocument = TextDocumentIdentifier(uri)),
+                        CodeLensParams.serializer(),
+                        ListSerializer(CodeLens.serializer()),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Resolves a code lens (fills its command). */
+    suspend fun codeLensResolve(lens: CodeLens): CodeLens? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "codeLens/resolve",
+                        lens,
+                        CodeLens.serializer(),
+                        CodeLens.serializer(),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    // ==================== Symbol search ====================
+
+    /** Queries workspace symbols matching [query]. */
+    suspend fun workspaceSymbols(query: String): List<WorkspaceSymbol>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "workspace/symbol",
+                        WorkspaceSymbolParams(query = query),
+                        WorkspaceSymbolParams.serializer(),
+                        WorkspaceSymbolResult.serializer(),
+                    )
+                }
+            }?.let { result ->
+                when (result) {
+                    is WorkspaceSymbolResult.Symbols -> result.value
+                    is WorkspaceSymbolResult.SymbolInfos -> result.value.map {
+                        WorkspaceSymbol(
+                            name = it.name,
+                            kind = it.kind,
+                            location = SymbolLocation.LocationValue(it.location),
+                            containerName = it.containerName,
+                        )
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    // ==================== References / rename ====================
+
+    /** Queries all references to the symbol at [position]. */
+    suspend fun references(uri: String, position: Position): List<Location>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/references",
+                        ReferenceParams(
+                            textDocument = TextDocumentIdentifier(uri),
+                            position = position,
+                            context = ReferenceContext(includeDeclaration = true),
+                        ),
+                        ReferenceParams.serializer(),
+                        ListSerializer(Location.serializer()),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Checks whether the symbol at [position] can be renamed. */
+    suspend fun prepareRename(uri: String, position: Position): PrepareRenameResult? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/prepareRename",
+                        PrepareRenameParams(textDocument = TextDocumentIdentifier(uri), position = position),
+                        PrepareRenameParams.serializer(),
+                        JsonElement.serializer(),
+                    )
+                }
+            }?.let { element ->
+                // Server returns Range | PrepareRenameResult | PrepareRenameDefaultBehavior
+                when (element) {
+                    is kotlinx.serialization.json.JsonObject ->
+                        if (element.containsKey("placeholder")) {
+                            LspJson.json.decodeFromJsonElement(PrepareRenameResult.serializer(), element)
+                        } else null
+                    is kotlinx.serialization.json.JsonArray -> null
+                    else -> null
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Executes a rename of the symbol at [position] to [newName]. Returns the workspace edit. */
+    suspend fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/rename",
+                        RenameParams(
+                            textDocument = TextDocumentIdentifier(uri),
+                            position = position,
+                            newName = newName,
+                        ),
+                        RenameParams.serializer(),
+                        WorkspaceEdit.serializer(),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    // ==================== Signature help ====================
+
+    /** Queries signature help at [position] (active signature/parameter). */
+    suspend fun signatureHelp(uri: String, position: Position): SignatureHelp? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/signatureHelp",
+                        SignatureHelpParams(textDocument = TextDocumentIdentifier(uri), position = position),
+                        SignatureHelpParams.serializer(),
+                        SignatureHelp.serializer(),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    // ==================== Navigation ====================
+
+    /** Queries type definition (e.g. the class of an expression). */
+    suspend fun typeDefinition(uri: String, position: Position): LocationResult? =
+        nullableRequest(
+            "textDocument/typeDefinition",
+            TypeDefinitionParams(TextDocumentIdentifier(uri), position),
+            TypeDefinitionParams.serializer(),
+            LocationResult.serializer(),
+        )
+
+    /** Queries implementations of a symbol. */
+    suspend fun implementation(uri: String, position: Position): LocationResult? =
+        nullableRequest(
+            "textDocument/implementation",
+            ImplementationParams(TextDocumentIdentifier(uri), position),
+            ImplementationParams.serializer(),
+            LocationResult.serializer(),
+        )
+
+    /** Queries declarations (older servers / C/C++). */
+    suspend fun declaration(uri: String, position: Position): LocationResult? =
+        nullableRequest(
+            "textDocument/declaration",
+            DeclarationParams(TextDocumentIdentifier(uri), position),
+            DeclarationParams.serializer(),
+            LocationResult.serializer(),
+        )
+
+    /** Queries document links (e.g. import statements). */
+    suspend fun documentLinks(uri: String): List<DocumentLink>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/documentLink",
+                        DocumentLinkParams(textDocument = TextDocumentIdentifier(uri)),
+                        DocumentLinkParams.serializer(),
+                        ListSerializer(DocumentLink.serializer()),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Queries selection ranges for [positions] (brace/expression expansion). */
+    suspend fun selectionRange(uri: String, positions: List<Position>): List<SelectionRange>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/selectionRange",
+                        SelectionRangeParams(
+                            textDocument = TextDocumentIdentifier(uri),
+                            positions = positions,
+                        ),
+                        SelectionRangeParams.serializer(),
+                        ListSerializer(SelectionRange.serializer()),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    // ==================== Diagnostics (pull) ====================
+
+    /** Pulls diagnostics for the document (`textDocument/diagnostic`). */
+    suspend fun diagnostic(uri: String): List<Diagnostic>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/diagnostic",
+                        DocumentDiagnosticParams(textDocument = TextDocumentIdentifier(uri)),
+                        DocumentDiagnosticParams.serializer(),
+                        JsonElement.serializer(),
+                    )
+                }
+            }?.let { element ->
+                val obj = element as? kotlinx.serialization.json.JsonObject ?: return null
+                val kind = obj["kind"]?.jsonPrimitive?.contentOrNull
+                if (kind == "full") {
+                    val items = obj["items"] as? kotlinx.serialization.json.JsonArray ?: return null
+                    LspJson.json.decodeFromJsonElement(
+                        ListSerializer(Diagnostic.serializer()),
+                        items,
+                    )
+                } else null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
 
     // ==================== Helpers ====================
 
