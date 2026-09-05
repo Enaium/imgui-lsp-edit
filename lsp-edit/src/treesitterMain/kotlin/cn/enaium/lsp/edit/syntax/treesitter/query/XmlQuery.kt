@@ -10,6 +10,7 @@ object XmlQuery {
 |["ANY" "ATTLIST" "CDATA" "DOCTYPE" "ELEMENT" "EMPTY" "ENTITY" "NDATA" "NOTATION" "PUBLIC" "SYSTEM" "encoding" "no" "standalone" "version" "xml" "yes"] @keyword
 |(STag) @keyword
 |(ETag) @keyword
+|(EmptyElemTag) @keyword
 |(Attribute) @property
 |(AttValue) @string
 |(Comment) @comment
