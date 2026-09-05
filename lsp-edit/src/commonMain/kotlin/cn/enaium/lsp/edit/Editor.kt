@@ -886,10 +886,18 @@ class Editor(
         }
 
         if (clicked) {
-            cursor = pos
-            selectionAnchor = pos
-            endHover()
-            onCursorChange?.invoke(cursor)
+            if (ImGui.isKeyDown(ImGuiKey.MOD_SHIFT) && selectionAnchor != null) {
+                // Shift+click: extend the selection from the current anchor
+                // to the clicked position (standard editor behavior).
+                cursor = pos
+                endHover()
+                onCursorChange?.invoke(cursor)
+            } else {
+                cursor = pos
+                selectionAnchor = pos
+                endHover()
+                onCursorChange?.invoke(cursor)
+            }
         } else if (dragging) {
             cursor = pos
             if (selectionAnchor == null) selectionAnchor = pos
@@ -950,17 +958,36 @@ class Editor(
         val top = viewOriginY
         val bottom = viewOriginY + viewHeight
         val speed = lineHeight * 2f
-        var delta = 0f
+        var deltaY = 0f
         if (mouseY < top + edgeZone) {
-            delta = -speed
+            deltaY = -speed
         } else if (mouseY > bottom - edgeZone) {
-            delta = speed
+            deltaY = speed
         }
-        if (delta != 0f) {
-            val newScroll = (scrollY + delta).coerceAtLeast(0f)
+        if (deltaY != 0f) {
+            val newScroll = (scrollY + deltaY).coerceAtLeast(0f)
             if (newScroll != scrollY) {
                 ImGui.setScrollY(newScroll)
                 scrollY = ImGui.getScrollY()
+            }
+        }
+        // Horizontal: dragging near the left/right edge of the text area
+        // scrolls horizontally so the selection can cross long lines.
+        val mouseX = ImGui.getMousePos().x
+        val left = textStartX
+        val right = textStartX + (viewWidth - gutterWidth)
+        var deltaX = 0f
+        if (mouseX < left + edgeZone) {
+            deltaX = -speed
+        } else if (mouseX > right - edgeZone) {
+            deltaX = speed
+        }
+        if (deltaX != 0f) {
+            val maxX = (contentWidth - viewWidth).coerceAtLeast(0f)
+            val newScroll = (scrollX + deltaX).coerceIn(0f, maxX)
+            if (newScroll != scrollX) {
+                ImGui.setScrollX(newScroll)
+                scrollX = ImGui.getScrollX()
             }
         }
     }
