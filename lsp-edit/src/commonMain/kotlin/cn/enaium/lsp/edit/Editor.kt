@@ -1254,6 +1254,18 @@ class Editor(
             )
         }
 
+        // Gutter background: a solid strip behind the line numbers so they
+        // stay readable over any content (VS Code style). The current-line
+        // row gets the line-number-selected tint.
+        if (showLineNumbers) {
+            val gutterBg = palette[PaletteIndex.CURRENT_LINE_FILL].toImGuiColor()
+            drawList.DrawRectFilled(
+                ImVec2(origin.x, origin.y),
+                ImVec2(origin.x + gutterWidth, origin.y + height),
+                gutterBg,
+            )
+        }
+
         // Gutter with line numbers, fold markers + diagnostics markers.
         if (showLineNumbers) {
             for (row in firstRow..lastRow) {
