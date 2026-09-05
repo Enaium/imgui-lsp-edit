@@ -18,5 +18,9 @@ object XmlQuery {
 |(XMLDecl) @keyword
 |(XMLDecl (VersionNum) @string)
 |(XMLDecl (EncName) @string)
+|(XMLDecl "version" @property)
+|(XMLDecl "encoding" @property)
+|(XMLDecl "standalone" @property)
+|(XMLDecl "xml" @property)
 """.trimMargin()
 }

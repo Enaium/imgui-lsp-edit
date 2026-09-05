@@ -51,9 +51,9 @@ class XmlHtmlHighlightTest {
         val spans = spansFor(TreeSitterLanguageSpec.XML, "<?xml version=\"1.0\"?>")
         // 'xml' at char 2: declaration keyword.
         assertTrue(spanAt(spans[0], 2, PaletteIndex.KEYWORD), "xml declaration not keyword-colored: ${spans[0]}")
-        // 'version' at char 6: the declaration Name is an anonymous regex
-        // token (not capturable), so it stays keyword-colored via XMLDecl.
-        assertTrue(spanAt(spans[0], 6, PaletteIndex.KEYWORD), "version attr not keyword: ${spans[0]}")
+        // 'version' at char 6: declaration attributes use the same property
+        // color as element attributes.
+        assertTrue(spanAt(spans[0], 6, PaletteIndex.KNOWN_IDENTIFIER), "version attr not property: ${spans[0]}")
         // '1.0' at char 15..18 must be string-colored (VersionNum capture;
         // the surrounding quotes stay keyword).
         assertTrue(spanAt(spans[0], 15, PaletteIndex.STRING), "decl value not string: ${spans[0]}")
@@ -72,6 +72,7 @@ class XmlHtmlHighlightTest {
             "<?xml version=\"1.0\"?>\n<root><child/></root>",
         )
         assertTrue(spanAt(spans[0], 2, PaletteIndex.KEYWORD), "declaration keyword: ${spans[0]}")
+        assertTrue(spanAt(spans[0], 6, PaletteIndex.KNOWN_IDENTIFIER), "decl version property: ${spans[0]}")
         assertTrue(spanAt(spans[0], 15, PaletteIndex.STRING), "decl value string: ${spans[0]}")
         assertTrue(spanAt(spans[1], 1, PaletteIndex.KEYWORD), "root tag keyword: ${spans[1]}")
         assertTrue(spanAt(spans[1], 7, PaletteIndex.KEYWORD), "child tag keyword: ${spans[1]}")
