@@ -360,7 +360,7 @@ class Editor(
     fun insertText(pos: DocPos, text: String) {
         if (readOnly) return
         val ops = buffer.insert(pos, text)
-        applyOps(ops, pos.plus(text.length), transaction = false)
+        applyOps(ops, buffer.offset(pos, text.length), transaction = false)
     }
 
     /** Erases [start, end). */
@@ -375,7 +375,9 @@ class Editor(
         val ops = undoStack.removeLastOrNull() ?: return
         for (op in ops.asReversed()) {
             if (op.insert) {
-                buffer.erase(op.pos, op.pos.plus(op.text.length))
+                // op.text may contain newlines; use the cross-line offset,
+                // not the same-line index addition.
+                buffer.erase(op.pos, buffer.offset(op.pos, op.text.length))
             } else {
                 buffer.insert(op.pos, op.text)
             }
@@ -891,6 +893,7 @@ class Editor(
         } else if (dragging) {
             cursor = pos
             if (selectionAnchor == null) selectionAnchor = pos
+            autoScrollWhileDragging(mouse.y)
             onCursorChange?.invoke(cursor)
         } else if (doubleClicked) {
             val (s, e) = wordBounds(pos)
@@ -934,6 +937,31 @@ class Editor(
             ImGui.beginTooltip()
             ImGui.text(marker.textTooltip)
             ImGui.endTooltip()
+        }
+    }
+
+    /**
+     * While drag-selecting, scrolling the mouse near the viewport's top or
+     * bottom edge scrolls the document so the selection can extend past the
+     * visible area (VS Code behavior). Uses a fixed per-frame speed.
+     */
+    private fun autoScrollWhileDragging(mouseY: Float) {
+        val edgeZone = (lineHeight * 1.5f).coerceAtLeast(16f)
+        val top = viewOriginY
+        val bottom = viewOriginY + viewHeight
+        val speed = lineHeight * 2f
+        var delta = 0f
+        if (mouseY < top + edgeZone) {
+            delta = -speed
+        } else if (mouseY > bottom - edgeZone) {
+            delta = speed
+        }
+        if (delta != 0f) {
+            val newScroll = (scrollY + delta).coerceAtLeast(0f)
+            if (newScroll != scrollY) {
+                ImGui.setScrollY(newScroll)
+                scrollY = ImGui.getScrollY()
+            }
         }
     }
 
@@ -1058,8 +1086,9 @@ class Editor(
         unfoldAround(next.line)
         endHover()
         if (shift) {
+            val anchor = selectionAnchor ?: cursor
             cursor = next
-            if (selectionAnchor == null) selectionAnchor = next
+            selectionAnchor = anchor
             scrollFollowRequested = true
             onCursorChange?.invoke(cursor)
         } else {
@@ -1170,19 +1199,21 @@ class Editor(
         val singleTyping = ops.size == 1 && ops[0].insert &&
             ops[0].text.length == 1 && !ops[0].text.contains('\n')
         val last = undoStack.lastOrNull()
-        if (singleTyping && last != null && last.size == 1 &&
-            last[0].insert && last[0].text.length == 1 && !last[0].text.contains('\n') &&
-            last[0].pos.plus(last[0].text.length) == ops[0].pos
-        ) {
-            // Merge consecutive single-character insertions into one undo step.
-            undoStack[undoStack.size - 1] = last + ops
-            redoStack.clear()
-            cursor = buffer.clamp(endAt)
-            scrollFollowSoft = true
-            invalidateFrom(ops.minOf { it.pos.line })
-            onTextChange?.invoke(ops)
-            onCursorChange?.invoke(cursor)
-            return
+        if (singleTyping && last != null && last.isNotEmpty()) {
+            val lastOp = last.last()
+            if (lastOp.insert && lastOp.text.length == 1 && !lastOp.text.contains('\n') &&
+                lastOp.pos.plus(lastOp.text.length) == ops[0].pos
+            ) {
+                // Merge consecutive single-character insertions into one undo step.
+                undoStack[undoStack.size - 1] = last + ops
+                redoStack.clear()
+                cursor = buffer.clamp(endAt)
+                scrollFollowSoft = true
+                invalidateFrom(ops.minOf { it.pos.line })
+                onTextChange?.invoke(ops)
+                onCursorChange?.invoke(cursor)
+                return
+            }
         }
         undoStack.addLast(ops)
         redoStack.clear()
