@@ -45,4 +45,28 @@ class XmlHtmlHighlightTest {
         val spans = spansFor(TreeSitterLanguageSpec.HTML, "<br/>")
         assertTrue(spanAt(spans[0], 1, PaletteIndex.KEYWORD), "html single tag name not keyword: ${spans[0]}")
     }
+
+    @Test
+    fun xmlDeclarationIsHighlighted() {
+        val spans = spansFor(TreeSitterLanguageSpec.XML, "<?xml version=\"1.0\"?>")
+        // 'xml' at char 2 sits inside the XMLDecl keyword span.
+        assertTrue(spanAt(spans[0], 2, PaletteIndex.KEYWORD), "xml declaration not keyword-colored: ${spans[0]}")
+    }
+
+    @Test
+    fun xmlDoctypeIsHighlighted() {
+        val spans = spansFor(TreeSitterLanguageSpec.XML, "<!DOCTYPE html>")
+        assertTrue(spanAt(spans[0], 2, PaletteIndex.KEYWORD), "doctype not keyword-colored: ${spans[0]}")
+    }
+
+    @Test
+    fun xmlFullDocumentHighlightsDeclarationAndTags() {
+        val spans = spansFor(
+            TreeSitterLanguageSpec.XML,
+            "<?xml version=\"1.0\"?>\n<root><child/></root>",
+        )
+        assertTrue(spanAt(spans[0], 2, PaletteIndex.KEYWORD), "declaration keyword: ${spans[0]}")
+        assertTrue(spanAt(spans[1], 1, PaletteIndex.KEYWORD), "root tag keyword: ${spans[1]}")
+        assertTrue(spanAt(spans[1], 7, PaletteIndex.KEYWORD), "child tag keyword: ${spans[1]}")
+    }
 }

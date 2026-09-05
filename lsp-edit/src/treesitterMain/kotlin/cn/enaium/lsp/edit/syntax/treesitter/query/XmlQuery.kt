@@ -15,5 +15,6 @@ object XmlQuery {
 |(AttValue) @string
 |(Comment) @comment
 |(doctypedecl) @keyword
+|(XMLDecl) @keyword
 """.trimMargin()
 }
