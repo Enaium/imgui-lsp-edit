@@ -128,4 +128,8 @@ mavenPublishing {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    testLogging {
+        showStandardStreams = true
+        events("passed", "failed", "skipped")
+    }
 }

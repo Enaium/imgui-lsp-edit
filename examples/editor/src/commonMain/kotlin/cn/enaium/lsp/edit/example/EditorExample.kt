@@ -98,6 +98,7 @@ private class LspEditorApp {
     private val showLineNumbers = BooleanArray(1) { true }
     private val wrap = BooleanArray(1) { false }
     private val darkPalette = BooleanArray(1) { true }
+    private val showIndentGuides = BooleanArray(1) { false }
     private var status = "connecting…"
     private var diagnosticsCount = 0
 
@@ -110,6 +111,28 @@ private class LspEditorApp {
         }
         lspEditor.onShowMessage = { status = it }
         lspEditor.onLogMessage = { status = it }
+
+        // Code lens above main(): a clickable "Run" that starts the demo
+        // debug session, VS Code style.
+        val mainLine = editor.buffer.lineCount().let { total ->
+            (0 until total).firstOrNull { editor.buffer.line(it).startsWith("fun main") } ?: 0
+        }
+        editor.codeLensProvider = { line ->
+            if (line == mainLine) {
+                listOf(
+                    cn.enaium.lsp.edit.EditorCodeLens(line, "Run (F5)", "demo.run"),
+                    cn.enaium.lsp.edit.EditorCodeLens(line, "▶ main", null),
+                )
+            } else null
+        }
+        editor.onCodeLensClick = { lens ->
+            status = "code lens: ${lens.title}${lens.command?.let { " ($it)" } ?: ""}"
+            if (lens.command == "demo.run" && !debugSession.active) {
+                GlobalScope.launch(Dispatchers.Default) {
+                    debugSession.start(breakpoints = editor.getBreakpointLines())
+                }
+            }
+        }
 
         // F9 in the editor toggles breakpoints; keep the debug session in
         // sync with the adapter.
@@ -156,6 +179,10 @@ private class LspEditorApp {
             if (darkPalette[0]) editor.palette = cn.enaium.lsp.edit.EditorPalette.dark
         }
         ImGui.sameLine()
+        if (ImGui.checkbox("Indent guides", showIndentGuides)) {
+            editor.showIndentGuides = showIndentGuides[0]
+        }
+        ImGui.sameLine()
         if (ImGui.button("Undo")) editor.undo()
         ImGui.sameLine()
         if (ImGui.button("Redo")) editor.redo()
@@ -184,12 +211,24 @@ private class LspEditorApp {
         ImGui.separator()
 
         // ==================== Editor ====================
+        // Reserve the bottom panel (debug + status) so the editor never
+        // pushes it outside the window: measure the panel height first by
+        // rendering it into a hidden-sized probe? No — compute a fixed
+        // budget: debug buttons + call stack + variables + output can grow,
+        // so the bottom panel gets its own scrollable child with a capped
+        // height, and the editor fills everything above it.
+        val bottomBudget = 260f
+        val avail = ImGui.getContentRegionAvail()
+        val editorH = (avail.y - bottomBudget).coerceAtLeast(120f)
         editor.overlay = { lspEditor.renderCompletionPopup() }
-        editor.render("##editor", ImVec2(-1f, -1f))
+        editor.render("##editor", ImVec2(avail.x, editorH))
 
         // Hover tooltip drawn outside the child window.
         lspEditor.renderHoverTooltip()
 
+        // ==================== Bottom panel (debug + status) ====================
+        if (ImGui.beginChild("##bottom", ImVec2(avail.x, bottomBudget), 0,
+                cn.enaium.imgui.ImGuiWindowFlags.HORIZONTAL_SCROLLBAR)) {
         // ==================== Debug panel ====================
         ImGui.separatorText("Debug (DAP)")
         if (ImGui.button("Start") && !debugSession.active) {
@@ -271,6 +310,8 @@ private class LspEditorApp {
         ) {
             lspEditor.requestCompletion()
         }
+        ImGui.endChild()
+        } // end bottom child
         ImGui.end()
 
         // ==================== Diff view ====================

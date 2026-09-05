@@ -59,7 +59,10 @@ class Editor(
      * sets it, so a large document can be read without the view snapping
      * back to the cursor every frame.
      */
-    private var scrollFollowRequested = true
+    // Starts false: opening a document must not auto-scroll (a long first
+    // line would otherwise nudge the view right/up toward the caret). The
+    // first user edit or caret move sets it and follows from then on.
+    private var scrollFollowRequested = false
 
     /**
      * Down-only scroll-follow for edits: typing must not yank the view back

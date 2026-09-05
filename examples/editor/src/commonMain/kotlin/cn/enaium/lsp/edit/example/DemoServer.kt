@@ -78,7 +78,19 @@ class DemoLanguageServer : LanguageServer {
         override fun hover(params: HoverParams): Hover? {
             val text = documents[params.textDocument.uri] ?: return null
             val word = wordAt(text, params.position) ?: return null
-            val doc = KEYWORD_DOCS[word] ?: "identifier `$word`"
+            val doc = when (word) {
+                // A hover with a fenced code block: the client renders it as
+                // read-only syntax-highlighted code (MarkdownCode).
+                "println" ->
+                    "Prints a line to stdout with a trailing newline.\n\n" +
+                        "```kotlin\n" +
+                        "fun main() {\n" +
+                        "    println(\"Hello, world!\")\n" +
+                        "    println(\"distance = ${'$'}{distance(origin, target)}\")\n" +
+                        "}\n" +
+                        "```"
+                else -> KEYWORD_DOCS[word] ?: "identifier `$word`"
+            }
             return Hover(
                 contents = HoverContents.Markup(
                     MarkupContent(

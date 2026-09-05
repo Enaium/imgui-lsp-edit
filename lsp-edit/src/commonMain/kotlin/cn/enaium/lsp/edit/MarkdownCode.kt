@@ -28,6 +28,12 @@ object MarkdownCode {
      * @param palette editor palette used for code-block colors (defaults to
      *   [EditorPalette.dark])
      */
+    /**
+     * Font used for inline code chips (typically a smaller variant).
+     * When null, the current font is used at its normal size.
+     */
+    var codeFont: cn.enaium.imgui.ImFont? = null
+
     fun render(
         config: MarkdownConfigHandle,
         markdown: String,
@@ -36,20 +42,120 @@ object MarkdownCode {
     ) {
         val segments = splitFencedBlocks(markdown)
         if (segments.size == 1) {
-            // No fenced blocks: plain path, identical to Markdown.render.
-            Markdown.render(config, markdown)
+            // No fenced blocks: render the prose with inline-code chips.
+            renderProseWithInlineCode(config, markdown, palette)
             return
         }
         for (segment in segments) {
             when (segment) {
                 is FencedBlock -> renderCodeBlock(segment, language, palette)
                 is Prose -> {
-                    if (segment.text.isNotBlank()) Markdown.render(config, segment.text)
+                    if (segment.text.isNotBlank()) {
+                        renderProseWithInlineCode(config, segment.text, palette)
+                    }
                 }
             }
             // A small gap after every segment keeps prose and code apart.
             ImGui.spacing()
         }
+    }
+
+    // ==================== inline code ====================
+
+    /**
+     * Renders [text] with `` `inline code` `` segments drawn as small
+     * bordered chips: the code font at a smaller size on a dim background
+     * with a thin border, staying on the same line as the surrounding prose.
+     */
+    private fun renderProseWithInlineCode(
+        config: MarkdownConfigHandle,
+        text: String,
+        palette: Array<Color>,
+    ) {
+        val parts = splitInlineCode(text)
+        if (parts.size == 1) {
+            Markdown.render(config, text)
+            return
+        }
+        var first = true
+        for (part in parts) {
+            when (part) {
+                is InlineProse -> {
+                    if (!first) ImGui.sameLine(0f, 2f)
+                    Markdown.render(config, part.text)
+                }
+                is InlineCode -> {
+                    if (!first) ImGui.sameLine(0f, 4f)
+                    renderInlineCodeChip(part.code, palette)
+                }
+            }
+            first = false
+        }
+    }
+
+    private sealed interface InlinePart
+    private data class InlineProse(val text: String) : InlinePart
+    private data class InlineCode(val code: String) : InlinePart
+
+    /** Splits [text] at `` ` ``-delimited inline code spans. */
+    private fun splitInlineCode(text: String): List<InlinePart> {
+        val parts = ArrayList<InlinePart>()
+        val prose = StringBuilder()
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '`') {
+                // Find the closing backtick.
+                val end = text.indexOf('`', i + 1)
+                if (end < 0) {
+                    prose.append(text.substring(i))
+                    break
+                }
+                if (prose.isNotEmpty()) {
+                    parts.add(InlineProse(prose.toString()))
+                    prose.clear()
+                }
+                parts.add(InlineCode(text.substring(i + 1, end)))
+                i = end + 1
+            } else {
+                prose.append(c)
+                i++
+            }
+        }
+        if (prose.isNotEmpty()) parts.add(InlineProse(prose.toString()))
+        return parts
+    }
+
+    /** Draws one inline code chip: small text on a dim box with a border. */
+    private fun renderInlineCodeChip(code: String, palette: Array<Color>) {
+        val font = codeFont
+        if (font != null) ImGui.pushFont(font)
+        val textSize = ImGui.calcTextSize(code)
+        val padding = 3f
+        val chipW = textSize.x + padding * 2f
+        val chipH = textSize.y + padding * 1.5f
+        val cursor = ImGui.getCursorScreenPos()
+        val drawList = ImGui.getWindowDrawList()
+        val bg = darken(palette[PaletteIndex.BACKGROUND].toImGuiColor(), 1.2f)
+        val border = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
+        drawList.DrawRectFilled(
+            ImVec2(cursor.x, cursor.y),
+            ImVec2(cursor.x + chipW, cursor.y + chipH),
+            bg,
+        )
+        drawList.DrawRect(
+            ImVec2(cursor.x, cursor.y),
+            ImVec2(cursor.x + chipW, cursor.y + chipH),
+            border,
+        )
+        drawList.DrawText(
+            ImVec2(cursor.x + padding, cursor.y + padding * 0.5f),
+            code,
+            palette[PaletteIndex.TEXT].toImGuiColor(),
+        )
+        // Reserve layout space: advance the cursor by the chip size.
+        ImGui.dummy(ImVec2(chipW, chipH))
+        if (font != null) ImGui.popFont()
     }
 
     // ==================== fenced block splitting ====================
