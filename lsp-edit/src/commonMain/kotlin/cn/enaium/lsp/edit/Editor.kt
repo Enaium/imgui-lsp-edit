@@ -1305,8 +1305,16 @@ class Editor(
 
         // Text + selection. Spans may be stale (semantic tokens from before
         // the last edit), so clamp them to the current line length.
+        // The text region is clipped to start at the gutter's right edge:
+        // horizontal scrolling must never paint code over the line-number
+        // column (the gutter background stays visible as a solid strip).
         val selection = selectionBounds()
         val wsColor = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
+        ImGui.pushClipRect(
+            ImVec2(textStartX, origin.y),
+            ImVec2(origin.x + width, origin.y + height),
+            true,
+        )
         for (row in firstRow..lastRow) {
             val line = visibleDocLines[row]
             val text = buffer.line(line)
@@ -1420,6 +1428,7 @@ class Editor(
                 )
             }
         }
+        ImGui.popClipRect()
 
         // Cursor — blinks while focused, solid otherwise. The blink phase
         // restarts whenever the cursor moves, so it is fully visible right
