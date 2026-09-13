@@ -276,22 +276,23 @@ class DemoLanguageServer : LanguageServer {
     private fun tokenize(text: String): List<Int> {
         // LSP semantic-token delta encoding: each token is
         // [deltaLine, deltaStart, length, tokenType, tokenModifiers].
-        // deltaStart is relative to the previous token's end on the same
-        // line (or the line start when deltaLine != 0).
+        // deltaStart is the gap between this token's start and the
+        // previous token's start on the same line (absolute, relative to
+        // the line start, when deltaLine != 0).
         val out = mutableListOf<Int>()
         var lastLine = 0
-        var lastEnd = 0
+        var lastStart = 0
         var emitted = false
         fun emit(lineIdx: Int, start: Int, length: Int, tokenType: Int) {
             val deltaLine = if (emitted) lineIdx - lastLine else 0
-            val deltaStart = if (!emitted || deltaLine != 0) start else start - lastEnd
+            val deltaStart = if (!emitted || deltaLine != 0) start else start - lastStart
             out += deltaLine
             out += deltaStart
             out += length
             out += tokenType
             out += 0 // tokenModifiers
             lastLine = lineIdx
-            lastEnd = start + length
+            lastStart = start
             emitted = true
         }
         val lines = text.split("\n")
