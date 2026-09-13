@@ -622,9 +622,12 @@ class Editor(
         // Edits use the soft (down-only) follow so typing above the
         // viewport never yanks the scroll position.
         if (scrollFollowRequested || scrollFollowSoft) {
-            ensureCursorVisible(followUp = scrollFollowRequested)
+            val followUp = scrollFollowRequested
             scrollFollowRequested = false
             scrollFollowSoft = false
+            // May re-arm scrollFollowSoft when ImGui clamped the target
+            // (content grew this frame; the scroll max updates next frame).
+            ensureCursorVisible(followUp = followUp)
         }
         drawText()
 
@@ -806,6 +809,9 @@ class Editor(
     /** Test hook: measured content height (valid after a render). */
     internal val contentHeightForTest: Float get() = contentHeight
 
+    /** Test hook: measured viewport height (valid after a render). */
+    internal val viewHeightForTest: Float get() = viewHeight
+
     /**
      * Scrolls the child window so the cursor stays visible after keyboard
      * movement or editing (scroll-follow). With [followUp] false (edits),
@@ -815,6 +821,11 @@ class Editor(
      * in both directions.
      */
     private fun ensureCursorVisible(followUp: Boolean) {
+        // The edit that requested this follow-up ran AFTER measure(), so the
+        // line<->visible-row map can be one frame stale (a new last line
+        // reports row null -> treated as row 0 -> "cursor visible" -> no
+        // scroll). Rebuild it first when dirty.
+        rebuildFoldsIfDirty()
         // Vertical: keep the cursor row inside the viewport.
         val cursorRow = (cursor.line.visibleRowOrNull() ?: 0).coerceIn(0, max(0, visibleLineCount - 1))
         val cursorTop = cursorRow * lineHeight
@@ -838,6 +849,14 @@ class Editor(
         if (newScrollX != scrollX) ImGui.setScrollX(newScrollX)
         scrollX = ImGui.getScrollX()
         scrollY = ImGui.getScrollY()
+        // ImGui's scroll maximum is derived from the PREVIOUS frame's
+        // content size: when an edit grows the document (e.g. a new last
+        // line), the requested target is clamped for this frame. Re-arm the
+        // (down-only) follow so the next frame — with the updated maximum —
+        // completes the scroll.
+        if (scrollY < newScrollY - 0.5f) {
+            scrollFollowSoft = true
+        }
     }
 
     private fun handleMouse(captureHovered: Boolean, captureActive: Boolean) {
