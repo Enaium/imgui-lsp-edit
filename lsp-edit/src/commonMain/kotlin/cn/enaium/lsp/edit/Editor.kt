@@ -9,7 +9,9 @@ import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
 import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.PI
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * An ImGui-driven code editor widget with syntax highlighting, undo/redo,
@@ -1523,6 +1525,19 @@ class Editor(
                     palette[PaletteIndex.INLAY_HINT].toImGuiColor(),
                 )
             }
+            // Diagnostic squiggle under the line's text.
+            val underline = markers[line]?.underlineColor
+            if (underline != null && text.isNotEmpty()) {
+                val startX = textStartX - scrollX
+                val endX = startX + lineAdvance(line, text.length)
+                drawSquiggle(
+                    drawList,
+                    startX,
+                    endX,
+                    y + lineHeight - 2.5f,
+                    underline.toImGuiColor(),
+                )
+            }
         }
         ImGui.popClipRect()
 
@@ -1694,6 +1709,26 @@ class Editor(
     }
 
     /**
+     * Draws a small sine-wave squiggle from [x0] to [x1] centered on [y]
+     * (used for diagnostic underlines). One short segment per pixel keeps
+     * the wave smooth; callers keep the span to the visible text.
+     */
+    private fun drawSquiggle(drawList: ImDrawList, x0: Float, x1: Float, y: Float, color: Int) {
+        if (x1 <= x0) return
+        val amplitude = 1.6f
+        val period = 5f
+        var x = x0
+        var prevY = y - amplitude
+        while (x <= x1) {
+            val phase = (x - x0) / period * 2f * PI.toFloat()
+            val waveY = y - amplitude * sin(phase)
+            drawList.DrawLine(ImVec2((x - 1f).coerceAtLeast(x0), prevY), ImVec2(x, waveY), color, 1f)
+            prevY = waveY
+            x += 1f
+        }
+    }
+
+    /**
      * Draws [hint] at [x] (its character gap) in the dim inlay style and
      * returns the x after the hint, so following text shifts right. Inlay
      * hints never affect the caret or column mapping.
@@ -1752,6 +1787,8 @@ class Editor(
 data class EditorMarker(
     val lineNumberColor: Color,
     val textColor: Color? = null,
+    /** When set, a squiggly underline in this color is drawn under the line. */
+    val underlineColor: Color? = null,
     val lineNumberTooltip: String? = null,
     val textTooltip: String? = null,
 )
