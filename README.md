@@ -1,5 +1,7 @@
 # lsp-edit
 
+![](https://img.cdn1.vip/i/6aa6658829937_1789289864.webp)
+
 A language-server-driven code editor widget for Kotlin Multiplatform, rendered
 with Dear ImGui via [imgui-kmp](https://github.com/Enaium/imgui-kmp) and wired
 to language servers through [lsp-kmp](https://github.com/Enaium/lsp-kmp).
