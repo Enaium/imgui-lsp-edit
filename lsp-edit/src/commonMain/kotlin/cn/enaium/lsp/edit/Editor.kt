@@ -394,7 +394,7 @@ class Editor(
         selectionAnchor = null
         cursor = ops.minOf { it.pos }.coerceAtLeast(DocPos(0, 0))
         scrollFollowSoft = true
-        endHover()
+        suppressHover()
         invalidateAll()
         onTextChange?.invoke(inverse.reversed())
         onCursorChange?.invoke(cursor)
@@ -416,7 +416,7 @@ class Editor(
         selectionAnchor = null
         cursor = end.coerceAtMost(endOfDocument())
         scrollFollowSoft = true
-        endHover()
+        suppressHover()
         invalidateAll()
         onTextChange?.invoke(ops)
         onCursorChange?.invoke(cursor)
@@ -426,7 +426,7 @@ class Editor(
         selectionAnchor = DocPos(0, 0)
         cursor = endOfDocument()
         scrollFollowRequested = true
-        endHover()
+        suppressHover()
         onCursorChange?.invoke(cursor)
     }
 
@@ -436,7 +436,7 @@ class Editor(
         unfoldAround(cursor.line)
         selectionAnchor = cursor
         scrollFollowRequested = true
-        endHover()
+        suppressHover()
         onCursorChange?.invoke(cursor)
     }
 
@@ -446,7 +446,7 @@ class Editor(
         unfoldAround(cursor.line)
         if (selectionAnchor == null) selectionAnchor = cursor
         scrollFollowRequested = true
-        endHover()
+        suppressHover()
         onCursorChange?.invoke(cursor)
     }
 
@@ -475,7 +475,7 @@ class Editor(
         selectionAnchor = s
         cursor = e
         lastFindPos = s
-        endHover()
+        suppressHover()
         onCursorChange?.invoke(cursor)
         return true
     }
@@ -798,8 +798,29 @@ class Editor(
      * different position, so a keyboard move (or edit) does not immediately
      * re-trigger the hover tooltip for the same word under a stationary mouse.
      */
+    /**
+     * Edit/keyboard hook: drop any shown hover and suppress a new one until
+     * the POINTER MOVES to another position. Unlike [endHover] it keeps
+     * [lastHoverPos] so the parked mouse does not look like a move on the
+     * next frame (which would immediately clear the suppression and let the
+     * hover cover the text being typed).
+     */
+    private fun suppressHover() {
+        hoverFired = false
+        hoverStillStartTime = 0.0
+        hoverSuppressed = true
+        onHoverEnd?.invoke()
+    }
+
     private fun endHover() {
-        if (lastHoverPos == null && !hoverFired) return
+        if (lastHoverPos == null && !hoverFired) {
+            // Nothing is showing yet, but ARM the suppression anyway: an
+            // edit or keypress with the mouse parked over the text must not
+            // let the hover fire 0.3s later (it would cover what is being
+            // typed). Cleared when the pointer moves to another position.
+            hoverSuppressed = true
+            return
+        }
         lastHoverPos = null
         hoverFired = false
         hoverStillStartTime = 0.0
@@ -1146,7 +1167,7 @@ class Editor(
         val next = step(cursor)
         if (next == cursor) return
         unfoldAround(next.line)
-        endHover()
+        suppressHover()
         if (shift) {
             val anchor = selectionAnchor ?: cursor
             cursor = next
@@ -1281,7 +1302,7 @@ class Editor(
         redoStack.clear()
         cursor = buffer.clamp(endAt)
         scrollFollowSoft = true
-        endHover()
+        suppressHover()
         val firstLine = ops.minOf { it.pos.line }
         invalidateFrom(firstLine)
         onTextChange?.invoke(ops)
