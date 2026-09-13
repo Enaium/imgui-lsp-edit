@@ -22,6 +22,24 @@ class UndoPasteTest {
     }
 
     @Test
+    fun undoNotifiesWithInvertedOps() {
+        val editor = Editor(initialText = "", language = Language.kotlin)
+        val notifications = mutableListOf<List<EditOp>>()
+        editor.onTextChange = { notifications.add(it) }
+        editor.setCursor(DocPos(0, 0))
+        editor.replaceSelection("hello")
+        assertEquals(1, notifications.size)
+        editor.undo()
+        assertEquals(2, notifications.size)
+        val undoOps = notifications[1]
+        assertEquals(1, undoOps.size)
+        // The host (LSP didChange) must see a DELETION, not a re-insertion.
+        assertEquals(false, undoOps[0].insert)
+        assertEquals("hello", undoOps[0].text)
+        assertEquals("", editor.getText())
+    }
+
+    @Test
     fun typedCharsMergeIntoSingleUndo() {
         val editor = Editor(initialText = "", language = Language.kotlin)
         editor.setText("")

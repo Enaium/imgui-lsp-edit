@@ -375,6 +375,11 @@ class Editor(
 
     fun undo() {
         val ops = undoStack.removeLastOrNull() ?: return
+        // The document change is the INVERSE of the recorded ops: notify
+        // hosts (LSP didChange) with inverted operations, otherwise the
+        // server is told the old text was inserted again and its document
+        // state drifts (stale diagnostics/highlighting after undo).
+        val inverse = ArrayList<EditOp>(ops.size)
         for (op in ops.asReversed()) {
             if (op.insert) {
                 // op.text may contain newlines; use the cross-line offset,
@@ -383,6 +388,7 @@ class Editor(
             } else {
                 buffer.insert(op.pos, op.text)
             }
+            inverse.add(EditOp(op.pos, op.text, insert = !op.insert))
         }
         redoStack.addLast(ops)
         selectionAnchor = null
@@ -390,12 +396,13 @@ class Editor(
         scrollFollowSoft = true
         endHover()
         invalidateAll()
-        onTextChange?.invoke(ops)
+        onTextChange?.invoke(inverse.reversed())
         onCursorChange?.invoke(cursor)
     }
 
     fun redo() {
         val ops = redoStack.removeLastOrNull() ?: return
+        // Re-applying the recorded ops IS the forward change: notify as-is.
         var end = ops.minOf { it.pos }
         for (op in ops) {
             if (op.insert) {
