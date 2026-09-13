@@ -713,7 +713,7 @@ class LspEditor(
     /** Returns the semantic-token spans for [line], or null to fall back. */
     private fun semanticTokenSpansFor(line: Int): List<TokenSpan>? = semanticSpans?.get(line)
 
-    private fun decodeSemanticTokens(
+    internal fun decodeSemanticTokens(
         tokens: SemanticTokens,
         legend: SemanticTokensLegend,
     ): MutableMap<Int, List<TokenSpan>> {
@@ -730,8 +730,12 @@ class LspEditor(
             // tokenModifiers at i+4 is ignored (relative format not requested).
             i += 5
 
-            // Delta encoding: deltaStart is relative to the previous token's
-            // END when deltaLine == 0, absolute when a new line starts.
+            // Delta encoding (LSP spec): deltaStart is relative to the
+            // previous token's START when deltaLine == 0 (it is the gap
+            // between the two token starts), absolute when a new line
+            // starts. startChar therefore must NOT advance by the token
+            // length after each token — doing so shifted every following
+            // token right by the accumulated lengths.
             line += deltaLine
             if (deltaLine == 0) startChar += deltaStart else startChar = deltaStart
 
@@ -740,7 +744,6 @@ class LspEditor(
                 result.getOrPut(line) { mutableListOf() }
                     .add(TokenSpan(startChar, startChar + length, palette))
             }
-            startChar += length
         }
         return result as MutableMap<Int, List<TokenSpan>>
     }
