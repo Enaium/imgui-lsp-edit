@@ -963,16 +963,23 @@ class Editor(
         }
 
         // Markers: line-number tooltip in the gutter, text tooltip over the
-        // content.
+        // content — but only while the pointer is inside the diagnostic's
+        // underlined range (same span as the squiggle), not on the whole
+        // line.
         val marker = markers[line.coerceAtMost(buffer.lineCount() - 1)]
         if (overGutter && marker != null) {
             ImGui.beginTooltip()
             ImGui.text(marker.lineNumberTooltip ?: "line ${line + 1}")
             ImGui.endTooltip()
-        } else if (!overGutter && marker != null && marker.textTooltip != null) {
-            ImGui.beginTooltip()
-            ImGui.text(marker.textTooltip)
-            ImGui.endTooltip()
+        } else if (!overGutter && marker?.textTooltip != null) {
+            val ranges = marker.underlineRanges
+            val insideRange = ranges.isNullOrEmpty() ||
+                ranges.any { pos.index >= it.first && pos.index < it.second }
+            if (insideRange) {
+                ImGui.beginTooltip()
+                ImGui.text(marker.textTooltip)
+                ImGui.endTooltip()
+            }
         }
     }
 
