@@ -1525,18 +1525,37 @@ class Editor(
                     palette[PaletteIndex.INLAY_HINT].toImGuiColor(),
                 )
             }
-            // Diagnostic squiggle under the line's text.
-            val underline = markers[line]?.underlineColor
+            // Diagnostic squiggle under the reported character range(s)
+            // (falls back to the whole line when no range is given).
+            val marker = markers[line]
+            val underline = marker?.underlineColor
             if (underline != null && text.isNotEmpty()) {
-                val startX = textStartX - scrollX
-                val endX = startX + lineAdvance(line, text.length)
-                drawSquiggle(
-                    drawList,
-                    startX,
-                    endX,
-                    y + lineHeight - 2.5f,
-                    underline.toImGuiColor(),
-                )
+                val lineX = textStartX - scrollX
+                val ranges = marker.underlineRanges
+                val waveY = y + lineHeight - 2.5f
+                if (ranges.isNullOrEmpty()) {
+                    drawSquiggle(
+                        drawList,
+                        lineX,
+                        lineX + lineAdvance(line, text.length),
+                        waveY,
+                        underline.toImGuiColor(),
+                    )
+                } else {
+                    for (r in ranges) {
+                        val from = r.first.coerceIn(0, text.length)
+                        val to = r.second.coerceIn(from, text.length)
+                        if (to > from) {
+                            drawSquiggle(
+                                drawList,
+                                lineX + lineAdvance(line, from),
+                                lineX + lineAdvance(line, to),
+                                waveY,
+                                underline.toImGuiColor(),
+                            )
+                        }
+                    }
+                }
             }
         }
         ImGui.popClipRect()
@@ -1789,6 +1808,12 @@ data class EditorMarker(
     val textColor: Color? = null,
     /** When set, a squiggly underline in this color is drawn under the line. */
     val underlineColor: Color? = null,
+
+    /**
+     * Character ranges (start inclusive, end exclusive) of the underline.
+     * Null/empty draws the wave under the whole line's text.
+     */
+    val underlineRanges: List<Pair<Int, Int>>? = null,
     val lineNumberTooltip: String? = null,
     val textTooltip: String? = null,
 )
