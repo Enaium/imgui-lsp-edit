@@ -119,7 +119,17 @@ kotlin-language-server defaults to socket mode):
 ```
 
 Native targets read `IMGUI_KMP_FRAMES=N` (or `--frames N` on the JVM) to exit
-after N frames for headless CI.
+after N frames for headless CI. Every example with native targets (`editor`,
+`diff`, `syntax`) links an executable per platform:
+
+```bash
+./gradlew :examples:syntax:linkDebugExecutableMacosArm64   # also linuxX64,
+                                                           # linuxArm64, mingwX64
+IMGUI_KMP_FRAMES=3 ./examples/syntax/build/bin/macosArm64/debugExecutable/syntax.kexe
+```
+
+`examples:kotlinlsp` is JVM-only by design: it launches the external
+`kotlin-lsp` process and talks to it over its stdio streams.
 
 ## Usage
 

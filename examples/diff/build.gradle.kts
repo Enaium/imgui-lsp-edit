@@ -25,6 +25,12 @@ kotlin {
     linuxX64 {
         binaries.executable()
     }
+    linuxArm64 {
+        binaries.executable()
+    }
+    mingwX64 {
+        binaries.executable()
+    }
 
     sourceSets {
         commonMain.dependencies {
