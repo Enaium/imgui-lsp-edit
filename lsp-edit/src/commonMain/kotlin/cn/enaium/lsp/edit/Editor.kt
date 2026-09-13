@@ -109,6 +109,14 @@ class Editor(
     var showMinimap: Boolean = true
     /** Minimap strip width in pixels. */
     var minimapWidth: Float = 96f
+
+    /**
+     * Effective strip width for the current viewport. Capped at a quarter of
+     * the available width: in a narrow pane the configured 96px would
+     * otherwise consume the whole viewport (viewWidth clamps to 0 and the
+     * strip covers the text entirely).
+     */
+    private var minimapWidthPx: Float = 0f
     /** Fixed minimap cell sizes (pixels), like ImGuiColorTextEdit. */
     var minimapRowHeight: Float = 3f
     var minimapColumnHeight: Float = 2f
@@ -195,6 +203,19 @@ class Editor(
     /** Start lines of ranges currently collapsed. */
     private val collapsedStarts = HashSet<Int>()
 
+    /** Line whose collapsed-fold preview is showing (-1 = none). */
+    private var foldPreviewLine = -1
+
+    /** Whether the ellipsis was hovered this frame (set by drawText). */
+    private var foldPreviewHover = false
+
+    /** Last frame's preview rect, used to keep it open while hovered. */
+    private var foldPreviewMin: ImVec2? = null
+    private var foldPreviewMax: ImVec2? = null
+
+    /** Max lines rendered in the fold-preview tooltip. */
+    private val FOLD_PREVIEW_MAX_LINES = 40
+
     /**
      * Visible-line mapping, rebuilt whenever folds or the document change:
      * [visibleDocLines][visibleDocLines] maps a visible row to its document
@@ -258,6 +279,109 @@ class Editor(
 
     /** The fold range starting exactly at [line], or null. */
     fun foldAt(line: Int): EditorFoldRange? = foldRanges.firstOrNull { it.startLine == line }
+
+    /** Opens/keeps the preview for [startLine] (called from drawText). */
+    private fun requestFoldPreview(startLine: Int) {
+        foldPreviewLine = startLine
+        foldPreviewHover = true
+    }
+
+    /**
+     * Collapsed-fold preview as a regular window (like the LSP hover popup):
+     * the pointer can move onto it — that keeps it open — and it can be
+     * resized with the mouse. Closing happens here, once the pointer is on
+     * neither the ellipsis nor the popup.
+     */
+    private fun renderFoldPreviewWindow() {
+        val line = foldPreviewLine
+        if (line < 0) return
+        val range = foldAt(line)
+        val mouse = ImGui.getMousePos()
+        val onPopup = foldPreviewMin?.let { min ->
+            val max = foldPreviewMax ?: min
+            // Outset: ImGui's resize border sits just outside the window
+            // rect — without the padding a drag on the edge counted as
+            // "pointer left" and the window vanished mid-resize.
+            val pad = 10f
+            mouse.x >= min.x - pad && mouse.x <= max.x + pad &&
+                mouse.y >= min.y - pad && mouse.y <= max.y + pad
+        } ?: false
+        if (range == null || line !in collapsedStarts || (!foldPreviewHover && !onPopup)) {
+            foldPreviewLine = -1
+            foldPreviewMin = null
+            foldPreviewMax = null
+            return
+        }
+        // Small first size (the old tooltip grew to every hidden line);
+        // APPEARING so a user resize survives until the next time it opens.
+        ImGui.setNextWindowPos(ImGui.getMousePos(), cn.enaium.imgui.ImGuiCond.APPEARING)
+        ImGui.setNextWindowSize(ImVec2(420f, 200f), cn.enaium.imgui.ImGuiCond.APPEARING)
+        ImGui.setNextWindowSizeConstraints(
+            ImVec2(240f, 80f),
+            ImVec2(1600f, max(viewHeight, 240f) * 2f),
+        )
+        ImGui.begin(
+            "##foldpreview-$uniqueId",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or
+                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
+        renderFoldPreviewBody(line, range)
+        val pos = ImGui.getWindowPos()
+        val size = ImGui.getWindowSize()
+        foldPreviewMin = pos
+        foldPreviewMax = ImVec2(pos.x + size.x, pos.y + size.y)
+        ImGui.end()
+    }
+
+    /** Lines a collapsed fold hides, colored with the editor's own spans. */
+    private fun renderFoldPreviewBody(startLine: Int, range: EditorFoldRange) {
+        val last = minOf(range.endLine, buffer.lineCount() - 1)
+        var line = startLine + 1
+        var shown = 0
+        while (line <= last) {
+            if (shown >= FOLD_PREVIEW_MAX_LINES) {
+                ImGui.textDisabled("…")
+                break
+            }
+            val text = buffer.line(line)
+            if (text.isEmpty()) {
+                ImGui.text(" ")
+            } else {
+                var pos = 0
+                var first = true
+                for (span in spansOf(line).sortedBy { it.start }) {
+                    val s = span.start.coerceIn(0, text.length)
+                    val e = span.end.coerceIn(s, text.length)
+                    if (e <= pos) continue
+                    if (s > pos) {
+                        first = emitPreviewSegment(first, text.substring(pos, s), PaletteIndex.TEXT)
+                    }
+                    first = emitPreviewSegment(first, text.substring(maxOf(s, pos), e), span.palette)
+                    pos = maxOf(pos, e)
+                }
+                if (pos < text.length) {
+                    emitPreviewSegment(first, text.substring(pos), PaletteIndex.TEXT)
+                }
+            }
+            shown++
+            line++
+        }
+    }
+
+    /** One colored chunk of the fold preview; returns the new "first" state. */
+    private fun emitPreviewSegment(first: Boolean, segment: String, paletteIndex: Int): Boolean {
+        if (segment.isEmpty()) return first
+        val idx = paletteIndex.coerceIn(0, PaletteIndex.COUNT - 1)
+        val color = ImGui.colorConvertU32ToFloat4(palette[idx].toImGuiColor())
+        if (first) {
+            ImGui.textColored(color, segment)
+        } else {
+            ImGui.sameLine(0f, 0f)
+            ImGui.textColored(color, segment)
+        }
+        return false
+    }
 
     /** The innermost fold range containing [line] (start < line <= end). */
     private fun containingFold(line: Int): EditorFoldRange? =
@@ -371,6 +495,29 @@ class Editor(
         val ops = buffer.erase(start, end)
         applyOps(ops, start, transaction = false)
         selectionAnchor = null
+    }
+
+    /**
+     * Applies [edits] as ONE undo step: a single undo reverts all of them
+     * (used for a completion's main edit together with its auto-import
+     * edits). Positions are in the document's current coordinates and the
+     * edits apply in list order, so callers pass them bottom-up — earlier
+     * edits must not shift later ones. [caret] places the cursor afterwards.
+     * Returns true when anything was applied.
+     */
+    fun applyEdits(edits: List<EditorEdit>, caret: DocPos? = null): Boolean {
+        if (readOnly) return false
+        val useful = edits.filter { it.from != it.to || it.text.isNotEmpty() }
+        if (useful.isEmpty()) return false
+        val ops = ArrayList<EditOp>()
+        for (e in useful) {
+            if (e.from != e.to) ops += buffer.erase(e.from, e.to)
+            if (e.text.isNotEmpty()) ops += buffer.insert(e.from, e.text)
+        }
+        if (ops.isEmpty()) return false
+        applyOps(ops, caret ?: cursor, transaction = true)
+        selectionAnchor = null
+        return true
     }
 
     fun undo() {
@@ -637,6 +784,7 @@ class Editor(
             ensureCursorVisible(followUp = followUp)
         }
         drawText()
+        renderFoldPreviewWindow()
 
         renderContextMenu()
         overlay?.invoke()
@@ -668,7 +816,8 @@ class Editor(
         val origin = ImGui.getCursorScreenPos()
         viewOriginX = origin.x + scrollX
         viewOriginY = origin.y + scrollY
-        viewWidth = (avail.x - if (showMinimap) minimapWidth else 0f).coerceAtLeast(0f)
+        minimapWidthPx = if (showMinimap) minOf(minimapWidth, avail.x * 0.25f) else 0f
+        viewWidth = (avail.x - minimapWidthPx).coerceAtLeast(0f)
         viewHeight = avail.y
         val newFontGeneration = ImGui.getFontSize()
         if (newFontGeneration != fontGeneration || font !== lastFont) {
@@ -694,7 +843,13 @@ class Editor(
             val w = if (cached != null && cached.size == len + 1) cached[len] else len * charWidth
             if (w > maxLineWidth) maxLineWidth = w
         }
-        contentWidth = max(avail.x, gutterWidth + maxLineWidth + 8f)
+        // This drives ImGui's horizontal scroll range through the capture
+        // item. The visible text area is viewWidth (the minimap strip is
+        // excluded from it), so pad by the strip's width — otherwise
+        // maxScroll = contentWidth - avail lets the line end travel under
+        // the minimap, where the text clip hides it entirely (scrolling to
+        // the far right could never reveal the end of a long line).
+        contentWidth = minimapWidthPx + max(viewWidth, gutterWidth + maxLineWidth + 8f)
         rebuildFoldsIfDirty()
         // No bottom padding: when the lines exactly fill the viewport the
         // scroll range must be zero, otherwise the window shows a small
@@ -897,7 +1052,9 @@ class Editor(
         // Minimap: clicks and drags scroll the document instead of moving
         // the caret. The strip sits right of the text area; rows use the
         // fixed minimap row height and scroll together with the document.
-        if (showMinimap && mouse.x >= viewOriginX + viewWidth && mouse.x < viewOriginX + viewWidth + minimapWidth) {
+        if (showMinimap && minimapWidthPx > 0f && mouse.x >= viewOriginX + viewWidth &&
+            mouse.x < viewOriginX + viewWidth + minimapWidthPx
+        ) {
             val click = ImGui.isItemClicked(0)
             val drag = captureActive && ImGui.isMouseDragging(0)
             if (click || drag) {
@@ -928,6 +1085,20 @@ class Editor(
         if (overGutter && ImGui.isItemClicked(0)) {
             val fold = foldAt(line)
             if (fold != null) {
+                toggleFold(line)
+                endHover()
+                return
+            }
+        }
+
+        // Clicking the ellipsis of a collapsed line unfolds it; the click
+        // must not also move the caret. Hit-test in SCREEN coordinates:
+        // `x` above is content-relative (mouse.x - textStartX + scrollX),
+        // so comparing it against a screen-space edge never matched.
+        if (ImGui.isItemClicked(0) && !overGutter && line in collapsedStarts && foldAt(line) != null) {
+            val ellipsisW = ImGui.calcTextSize("...").x
+            val ex = textStartX - scrollX + lineVisualAdvance(line, buffer.line(line).length) + charWidth * 0.5f
+            if (mouse.x >= ex && mouse.x <= ex + ellipsisW) {
                 toggleFold(line)
                 endHover()
                 return
@@ -1039,7 +1210,7 @@ class Editor(
             deltaX = speed
         }
         if (deltaX != 0f) {
-            val maxX = (contentWidth - viewWidth).coerceAtLeast(0f)
+            val maxX = (contentWidth - minimapWidthPx - viewWidth).coerceAtLeast(0f)
             val newScroll = (scrollX + deltaX).coerceIn(0f, maxX)
             if (newScroll != scrollX) {
                 ImGui.setScrollX(newScroll)
@@ -1375,6 +1546,7 @@ class Editor(
 
     private fun drawText() {
         rebuildFoldsIfDirty()
+        foldPreviewHover = false
         val drawList = ImGui.getWindowDrawList()
         val origin = ImVec2(viewOriginX, viewOriginY)
         val width = viewWidth
@@ -1440,16 +1612,31 @@ class Editor(
                         palette[PaletteIndex.BREAKPOINT].toImGuiColor(),
                     )
                 }
-                // Fold marker at the right edge of the gutter: an arrow that
-                // points down when expanded (click to fold) and right when
-                // collapsed (click to unfold). ASCII glyphs so any monospace
-                // font renders them.
+                // Fold marker at the right edge of the gutter: a boxed "-"
+                // when expanded (click to fold) and "+" when collapsed (click
+                // to unfold) — IntelliJ style frame so the toggle targets are
+                // visible at a glance. ASCII glyphs render in any mono font.
                 if (foldAt(line) != null) {
                     val folded = line in collapsedStarts
+                    val markerX = origin.x + gutterWidth - charWidth - 2f
+                    val color = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
+                    // Square frame centred on the glyph (not a stretched
+                    // rectangle): side = line height minus a small margin.
+                    val side = lineHeight - 4f
+                    val cx = markerX + charWidth / 2f
+                    val cy = numY + lineHeight / 2f
+                    drawList.DrawRect(
+                        ImVec2(cx - side / 2f, cy - side / 2f),
+                        ImVec2(cx + side / 2f, cy + side / 2f),
+                        color,
+                        2f,
+                        0,
+                        1f,
+                    )
                     drawList.DrawText(
-                        ImVec2(origin.x + gutterWidth - charWidth - 2f, numY),
-                        if (folded) ">" else "v",
-                        palette[PaletteIndex.LINE_NUMBER].toImGuiColor(),
+                        ImVec2(markerX, numY),
+                        if (folded) "+" else "-",
+                        color,
                     )
                 }
             }
@@ -1571,13 +1758,27 @@ class Editor(
                 x = drawInlayHint(drawList, hints[hintIdx], x, y)
                 hintIdx++
             }
-            // Ellipsis when the line is a collapsed fold start.
+            // Ellipsis when the line is a collapsed fold start: hovering it
+            // previews the hidden snippet, clicking it unfolds (handled in
+            // handleMouse so the caret does not also jump).
             if (line in collapsedStarts) {
+                val ellipsis = "..."
+                val ex = x + charWidth * 0.5f
+                val ew = ImGui.calcTextSize(ellipsis).x
+                val hovered = ImGui.isWindowHovered() &&
+                    ImGui.getMousePos().let { m ->
+                        m.x >= ex && m.x <= ex + ew && m.y >= y && m.y <= y + lineHeight
+                    }
                 drawList.DrawText(
-                    ImVec2(x + charWidth * 0.5f, y),
-                    "...",
-                    palette[PaletteIndex.INLAY_HINT].toImGuiColor(),
+                    ImVec2(ex, y),
+                    ellipsis,
+                    if (hovered) {
+                        palette[PaletteIndex.TEXT].toImGuiColor()
+                    } else {
+                        palette[PaletteIndex.INLAY_HINT].toImGuiColor()
+                    },
                 )
+                if (hovered) requestFoldPreview(line)
             }
             // Diagnostic squiggle under the reported character range(s)
             // (falls back to the whole line when no range is given).
@@ -1624,6 +1825,14 @@ class Editor(
         }
         val blinkOn = ((time - cursorMoveTime) % 1.0) < 0.5
         if (blinkOn || !isFocused) {
+            // Clip to the text area like everything else: a caret past the
+            // viewport's right edge would otherwise paint into the minimap
+            // strip (it sits right after the text region).
+            ImGui.pushClipRect(
+                ImVec2(textStartX, origin.y),
+                ImVec2(origin.x + width, origin.y + height),
+                true,
+            )
             val cl = cursor.line
             val row = cl.visibleRowOrNull()
             if (row != null && row in firstRow..lastRow) {
@@ -1640,6 +1849,7 @@ class Editor(
                     palette[PaletteIndex.CURSOR].toImGuiColor(),
                 )
             }
+            ImGui.popClipRect()
         }
 
         // ==================== Minimap ====================
@@ -1648,10 +1858,10 @@ class Editor(
         // are drawn as per-column blocks, and a translucent viewport window
         // tracks the visible range. The strip scrolls independently of the
         // text. Clicking/dragging scrolls (see handleMouse).
-        if (showMinimap && minimapWidth > 0f && minimapRowHeight > 0f) {
+        if (showMinimap && minimapWidthPx > 0f && minimapRowHeight > 0f) {
             val mmX = origin.x + width
             val mmY = origin.y
-            val mmW = minimapWidth
+            val mmW = minimapWidthPx
             val mmH = height
             // Minimap strip background.
             drawList.DrawRectFilled(

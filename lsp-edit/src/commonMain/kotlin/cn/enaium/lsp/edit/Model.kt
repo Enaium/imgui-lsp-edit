@@ -27,6 +27,13 @@ data class DocRange(val start: DocPos, val end: DocPos) {
 data class EditOp(val pos: DocPos, val text: String, val insert: Boolean)
 
 /**
+ * A range replacement in the document's current coordinates,
+ * [from]..[to) -> [text]. Batched via [Editor.applyEdits] so the whole
+ * batch is one undo step.
+ */
+data class EditorEdit(val from: DocPos, val to: DocPos, val text: String)
+
+/**
  * Packed RGBA color (0xRRGGBBAA). Palette entries are stored as [Long]s so
  * full-range hex constants (`0xFF11223344L`) round-trip on every target.
  */
