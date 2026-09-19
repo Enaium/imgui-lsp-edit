@@ -99,6 +99,14 @@ kotlin {
 
 // ===== Publishing (com.vanniktech.maven.publish) =====
 mavenPublishing {
+    // Central Portal (com.vanniktech 0.30+); credentials + signing keys come
+    // from ~/.gradle/gradle.properties (mavenCentralUsername/Password,
+    // signingInMemoryKey/Password).
+    // automaticRelease=true: the deployment is released to Maven Central as
+    // soon as validation passes (no manual Portal click needed).
+    publishToMavenCentral(true)
+    signAllPublications()
+
     coordinates("cn.enaium.imgui", "lsp-edit", project.version.toString())
 
     pom {

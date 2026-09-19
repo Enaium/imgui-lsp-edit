@@ -2049,6 +2049,15 @@ class Editor(
      * the value stays inside the viewport when the document is scrolled
      * (the completion popup anchors to it).
      */
+    /** Screen-space x of column [index] on [line] (for host-drawn overlays). */
+    fun posScreenX(line: Int, index: Int): Float = textStartX - scrollX + lineVisualAdvance(line, index)
+
+    /** Screen-space y of [line]'s top edge (null when the line is not visible). */
+    fun posScreenY(line: Int): Float? {
+        val row = line.visibleRowOrNull() ?: return null
+        return textStartY + row * lineHeight - (scrollY % lineHeight)
+    }
+
     fun caretScreenY(): Float {
         val row = cursor.line.visibleRowOrNull()
         val firstRow = floor(scrollY / lineHeight).toInt().coerceIn(0, max(0, visibleLineCount - 1))
