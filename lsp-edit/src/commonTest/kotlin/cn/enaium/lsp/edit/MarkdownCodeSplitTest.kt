@@ -7,6 +7,19 @@ import kotlin.test.assertTrue
 /** Tests for the fenced-code-block splitting used by [MarkdownCode]. */
 class MarkdownCodeSplitTest {
 
+    /**
+     * A document that is a single fenced block yields ONE segment — which the
+     * renderer used to read as "no code block" and then drew the fence markers
+     * as inline-code chips, losing the block's highlighting.
+     */
+    @Test
+    fun singleFencedBlockIsNotProse() {
+        val segs = MarkdownCode.splitFencedBlocks("```kotlin\nval name: String\n```")
+        assertEquals(1, segs.size)
+        assertTrue(segs[0] is MarkdownCode.FencedBlock, "expected a FencedBlock, got ${segs[0]}")
+    }
+
+
     @Test
     fun plainMarkdownHasSingleProseSegment() {
         val segments = MarkdownCode.splitFencedBlocks("**bold** and `inline`")

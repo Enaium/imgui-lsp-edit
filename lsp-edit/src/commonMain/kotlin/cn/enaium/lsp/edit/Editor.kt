@@ -4,9 +4,12 @@ import cn.enaium.imgui.ImDrawList
 import cn.enaium.imgui.ImGui
 import cn.enaium.imgui.ImFont
 import cn.enaium.imgui.ImGuiChildFlags
+import cn.enaium.imgui.ImGuiCol
+import cn.enaium.imgui.ImGuiCond
 import cn.enaium.imgui.ImGuiKey
 import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
+import cn.enaium.imgui.ImVec4
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.PI
@@ -17,7 +20,7 @@ import kotlin.math.sin
  * An ImGui-driven code editor widget with syntax highlighting, undo/redo,
  * find/replace, markers (diagnostics), hover callbacks, and LSP-style
  * tokenization hooks. Rendering and interaction are self-contained: call
- * [render] inside any ImGui window, drive text through [inputText]/
+ * [render] inside any ImGui wisndow, drive text through [inputText]/
  * [queueTextInput], and observe edits via [onTextChange].
  */
 class Editor(
@@ -205,6 +208,13 @@ class Editor(
 
     /** Line whose collapsed-fold preview is showing (-1 = none). */
     private var foldPreviewLine = -1
+
+    // ---- diagnostic tooltip (rendered as a window) ----
+    private var markerTipText: String? = null
+    private var markerTipHover = false
+    private var markerTipMin: ImVec2? = null
+    private var markerTipMax: ImVec2? = null
+    private var markerTipHideDeadline = 0.0
 
     /** Whether the ellipsis was hovered this frame (set by drawText). */
     private var foldPreviewHover = false
@@ -413,8 +423,190 @@ class Editor(
         visibleLineCount = visible.size
     }
 
+    /** Find/replace bar pinned to the editor's top-right corner. */
+    private fun renderFindPanel() {
+        if (!findVisible) return
+        val panePos = ImGui.getWindowPos()
+        val paneSize = ImGui.getWindowSize()
+        val width = 540f
+        ImGui.setNextWindowPos(
+            ImVec2(panePos.x + paneSize.x - width - 26f, panePos.y + 8f),
+            ImGuiCond.ALWAYS,
+        )
+        ImGui.setNextWindowSize(ImVec2(width, 0f), ImGuiCond.ALWAYS)
+        ImGui.begin(
+            "##editorFind$uniqueId",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_RESIZE or
+                ImGuiWindowFlags.ALWAYS_AUTO_RESIZE or ImGuiWindowFlags.NO_SCROLLBAR or
+                ImGuiWindowFlags.NO_MOVE or ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or
+                ImGuiWindowFlags.NO_NAV_FOCUS or ImGuiWindowFlags.NO_SAVED_SETTINGS,
+        )
+        if (findFocusSearch) {
+            ImGui.setKeyboardFocusHere()
+            findFocusSearch = false
+        }
+        ImGui.pushItemWidth(230f)
+        val typed = ImGui.inputText("##findQuery$uniqueId", findQuery) ?: findQuery
+        ImGui.popItemWidth()
+        val searchFocused = ImGui.isItemFocused()
+        findSearchFocused = searchFocused || (ImGui.isWindowFocused() && findSearchFocused && !ImGui.isAnyItemActive())
+        if (typed != findQuery) {
+            findQuery = typed
+            findCurrent = 0
+            rescanFind()
+            if (findHits.isNotEmpty()) gotoFindHit(0)
+        }
+        ImGui.sameLine()
+        if (findToggle("Aa", findMatchCase)) {
+            findMatchCase = !findMatchCase
+            findCurrent = 0
+            rescanFind()
+        }
+        ImGui.sameLine()
+        if (findToggle("ab", findWholeWord)) {
+            findWholeWord = !findWholeWord
+            findCurrent = 0
+            rescanFind()
+        }
+        ImGui.sameLine()
+        if (findToggle(".*", findRegex)) {
+            findRegex = !findRegex
+            findCurrent = 0
+            rescanFind()
+        }
+        ImGui.sameLine()
+        val status = when {
+            findInvalid -> "Invalid regex"
+            findQuery.isEmpty() -> ""
+            findHits.isEmpty() -> "No results"
+            else -> "${findCurrent + 1}/${findHits.size}"
+        }
+        if (findInvalid) ImGui.pushStyleColor(ImGuiCol.TEXT, ImVec4(1f, 0.4f, 0.4f, 1f))
+        ImGui.text(status)
+        if (findInvalid) ImGui.popStyleColor()
+        ImGui.sameLine()
+        if (ImGui.smallButton("^##findPrev$uniqueId")) findStep(forward = false)
+        ImGui.sameLine()
+        if (ImGui.smallButton("v##findNext$uniqueId")) findStep(forward = true)
+        ImGui.sameLine()
+        if (ImGui.smallButton("x##findClose$uniqueId")) {
+            closeFind()
+            ImGui.end()
+            return
+        }
+        if (findReplaceRow) {
+            ImGui.pushItemWidth(230f)
+            val typedReplace = ImGui.inputText("##findReplace$uniqueId", findReplacement) ?: findReplacement
+            ImGui.popItemWidth()
+            findReplacement = typedReplace
+            ImGui.sameLine()
+            if (ImGui.smallButton("Replace")) replaceCurrent()
+            ImGui.sameLine()
+            if (ImGui.smallButton("Replace All")) replaceAll()
+        }
+        if (searchFocused && ImGui.isKeyPressed(ImGuiKey.ENTER)) {
+            val shift = ImGui.isKeyDown(ImGuiKey.LEFT_SHIFT) || ImGui.isKeyDown(ImGuiKey.RIGHT_SHIFT)
+            findStep(forward = !shift)
+        }
+        if (ImGui.isKeyPressed(ImGuiKey.ESCAPE)) closeFind()
+        ImGui.end()
+    }
+
+    /** Small toggle button painted like a pressed tool button when active. */
+    private fun findToggle(label: String, active: Boolean): Boolean {
+        if (active) ImGui.pushStyleColor(ImGuiCol.BUTTON, ImVec4(0.26f, 0.45f, 0.62f, 1f))
+        val clicked = ImGui.smallButton("$label##find-$label$uniqueId")
+        if (active) ImGui.popStyleColor()
+        return clicked
+    }
+
+    /**
+     * Set by the host while one of its own text fields owns the keyboard: the
+     * editor then ignores keystrokes and queued text so they cannot modify
+     * the document.
+     */
+    var keyboardOwnedByHost: Boolean = false
+
     /** Extra drawing hook invoked after the editor content each frame. */
     var overlay: (() -> Unit)? = null
+
+    /**
+     * Background highlights (search matches, rename linkage, ...). Grouped by
+     * line on assignment so drawing costs O(visible rows).
+     */
+    var highlights: List<EditorHighlight> = emptyList()
+        set(value) {
+            if (field == value) return
+            field = value
+            highlightsByLine = value.groupBy { it.line }
+            invalidateAll()
+        }
+
+    private var highlightsByLine: Map<Int, List<EditorHighlight>> = emptyMap()
+
+    // ==================== find / replace ====================
+
+    /** Whether the find bar is showing. */
+    var findVisible: Boolean = false
+        private set
+
+    /** Whether the replace row is part of the bar (Cmd+R vs Cmd+F). */
+    var findReplaceRow: Boolean = false
+        private set
+
+    private var findQuery = ""
+    private var findReplacement = ""
+    private var findMatchCase = false
+    private var findWholeWord = false
+    private var findRegex = false
+    private var findCurrent = 0
+    private var findInvalid = false
+    private var findFocusSearch = false
+    private var findSearchFocused = false
+    private var findHits: List<FindHit> = emptyList()
+    private var findHighlightList: List<EditorHighlight> = emptyList()
+    private var findHighlightByLine: Map<Int, List<EditorHighlight>> = emptyMap()
+
+    /** One search hit: line and the character range [start, end). */
+    private class FindHit(val line: Int, val start: Int, val end: Int, val groups: List<String>)
+
+    // ==================== in-place rename ====================
+
+    /** True while a symbol is being renamed in place. */
+    var renameActive: Boolean = false
+        private set
+
+    /**
+     * True for the frame in which a rename consumed Enter/Esc. The rename runs
+     * before the editor handles keys, so on that frame [renameActive] is
+     * already false — the reservation must outlive it or Enter would also be
+     * inserted as a newline.
+     */
+    var renameConsumedKeys: Boolean = false
+        private set
+
+    /**
+     * True while the change being notified comes from undo/redo. Hosts must
+     * not react to it the way they react to typing: an undo is not a prefix
+     * being written, so it must not open a completion popup.
+     */
+    var lastChangeWasHistory: Boolean = false
+        private set
+
+    /**
+     * Invoked on commit with the symbol's position and the new name; the host
+     * performs the LSP rename. Occurrences in this document were already
+     * renamed live.
+     */
+    var onRenameCommit: ((line: Int, index: Int, newName: String) -> Unit)? = null
+
+    private var renameLine = -1
+    private var renameStart = 0
+    private var renameOriginal = ""
+    private var renameName = ""
+    private var renameHits: List<Triple<Int, Int, Int>> = emptyList()
+    private var renameHighlightByLine: Map<Int, List<EditorHighlight>> = emptyMap()
 
     /**
      * When set and returns true, the editor leaves Up/Down/Enter/Tab to an
@@ -543,7 +735,12 @@ class Editor(
         scrollFollowSoft = true
         suppressHover()
         invalidateAll()
-        onTextChange?.invoke(inverse.reversed())
+        lastChangeWasHistory = true
+        try {
+            onTextChange?.invoke(inverse.reversed())
+        } finally {
+            lastChangeWasHistory = false
+        }
         onCursorChange?.invoke(cursor)
     }
 
@@ -565,7 +762,12 @@ class Editor(
         scrollFollowSoft = true
         suppressHover()
         invalidateAll()
-        onTextChange?.invoke(ops)
+        lastChangeWasHistory = true
+        try {
+            onTextChange?.invoke(ops)
+        } finally {
+            lastChangeWasHistory = false
+        }
         onCursorChange?.invoke(cursor)
     }
 
@@ -669,7 +871,16 @@ class Editor(
         pendingText.append(text)
     }
 
+    /** True while the host should not request completions (renaming). */
+    val suppressCompletion: Boolean get() = renameActive
+
     private fun flushPendingText() {
+        // Same rule as the keyboard: text that belongs to a focused field must
+        // not land in the document.
+        if (keyboardOwnedByHost || (findVisible && findSearchFocused)) {
+            pendingText.clear()
+            return
+        }
         if (pendingText.isEmpty()) return
         val text = pendingText.toString()
         pendingText.clear()
@@ -716,6 +927,310 @@ class Editor(
 
     /** The debugger's current execution line (1-based), or null. */
     fun getExecutionLine(): Int? = executionLine
+
+    /** Opens the find bar (Cmd+F); [withReplace] also shows the replace row. */
+    fun openFind(withReplace: Boolean = false) {
+        val selected = getSelectedText()
+        if (selected.isNotEmpty() && !selected.contains('\n')) findQuery = selected
+        findReplaceRow = findReplaceRow || withReplace
+        findVisible = true
+        findFocusSearch = true
+        findCurrent = 0
+        rescanFind()
+    }
+
+    /** Closes the find bar and clears its highlights. */
+    fun closeFind() {
+        findVisible = false
+        findReplaceRow = false
+        findHits = emptyList()
+        findHighlightList = emptyList()
+        findHighlightByLine = emptyMap()
+        invalidateAll()
+    }
+
+    /** Moves to the next/previous match (wrapping). */
+    fun findStep(forward: Boolean) {
+        if (findHits.isEmpty()) return
+        val next = if (forward) {
+            (findCurrent + 1) % findHits.size
+        } else {
+            (findCurrent - 1 + findHits.size) % findHits.size
+        }
+        gotoFindHit(next)
+    }
+
+    /** Replaces the current match. */
+    fun replaceCurrent() {
+        val hit = findHits.getOrNull(findCurrent) ?: return
+        applyEdits(
+            listOf(
+                EditorEdit(
+                    DocPos(hit.line, hit.start),
+                    DocPos(hit.line, hit.end),
+                    expandFindReplacement(hit),
+                ),
+            ),
+        )
+        rescanFind()
+        if (findCurrent >= findHits.size) findCurrent = 0
+    }
+
+    /** Replaces every match as one undoable edit. */
+    fun replaceAll() {
+        if (findHits.isEmpty()) return
+        val edits = findHits.asReversed().map { hit ->
+            EditorEdit(DocPos(hit.line, hit.start), DocPos(hit.line, hit.end), expandFindReplacement(hit))
+        }
+        applyEdits(edits)
+        findCurrent = 0
+        rescanFind()
+    }
+
+    /** `$n` / `${n}` expansion for regex replacements. */
+    private fun expandFindReplacement(hit: FindHit): String {
+        if (!findRegex) return findReplacement
+        return Regex("\\$\\{(\\d+)\\}|\\$(\\d+)").replace(findReplacement) { m ->
+            val idx = (m.groupValues[1].ifEmpty { m.groupValues[2] }).toIntOrNull() ?: -1
+            hit.groups.getOrNull(idx) ?: m.value
+        }
+    }
+
+    private fun rescanFind() {
+        findInvalid = false
+        val hits = ArrayList<FindHit>()
+        if (findQuery.isNotEmpty()) {
+            val pattern = try {
+                val body = if (findRegex) findQuery else Regex.escape(findQuery)
+                val wrapped = if (findWholeWord) "\\b(?:$body)\\b" else body
+                Regex(wrapped, if (findMatchCase) emptySet() else setOf(RegexOption.IGNORE_CASE))
+            } catch (t: Throwable) {
+                findInvalid = true
+                null
+            }
+            if (pattern != null) {
+                for (l in 0 until buffer.lineCount()) {
+                    for (m in pattern.findAll(buffer.line(l))) {
+                        if (m.value.isEmpty()) continue
+                        hits.add(FindHit(l, m.range.first, m.range.last + 1, m.groupValues))
+                    }
+                }
+            }
+        }
+        findHits = hits
+        if (findCurrent >= hits.size) findCurrent = 0
+        val fill = palette[PaletteIndex.SEARCH_RESULT_BG]
+        val accent = palette[PaletteIndex.MATCHING_BRACKET_ACTIVE]
+        val list = ArrayList<EditorHighlight>(hits.size)
+        for ((i, hit) in hits.withIndex()) {
+            val current = i == findCurrent
+            list.add(
+                EditorHighlight(
+                    line = hit.line,
+                    start = hit.start,
+                    end = hit.end,
+                    fill = if (current) withAlpha(accent, 0x66) else withAlpha(fill, 0x55),
+                    border = withAlpha(accent, 0x99),
+                    borderThickness = if (current) 1.5f else 1f,
+                ),
+            )
+        }
+        findHighlightList = list
+        findHighlightByLine = list.groupBy { it.line }
+        invalidateAll()
+    }
+
+    private fun gotoFindHit(index: Int) {
+        val hit = findHits.getOrNull(index) ?: return
+        findCurrent = index
+        // Move the caret to the match but do NOT select it: a selection would
+        // turn the next keystroke into a replacement of the match. The match
+        // is shown by its highlight.
+        setCursor(DocPos(hit.line, hit.start))
+        scrollFollowRequested = true
+        rescanFind() // refresh which match is drawn as current
+    }
+
+    /** Packed colour with [alpha] replacing its own. */
+    private fun withAlpha(color: Color, alpha: Int): Color {
+        return ((color and 0x00000000FFFFFFFFL) and 0x00FFFFFFL) or (alpha.toLong() shl 24)
+    }
+
+    /**
+     * Starts an in-place rename of the symbol under the caret: it becomes the
+     * selection, typing edits it directly, every other occurrence follows and
+     * Enter commits (via [onRenameCommit]), Esc restores.
+     */
+    fun startRename(): Boolean {
+        val line = cursor.line
+        val text = buffer.line(line)
+        var start = cursor.index
+        var end = cursor.index
+        while (start > 0 && isWord(text[start - 1])) start--
+        while (end < text.length && isWord(text[end])) end++
+        if (start == end) return false
+        renameLine = line
+        renameStart = start
+        renameOriginal = text.substring(start, end)
+        renameName = renameOriginal
+        renameHits = renameOccurrences(renameOriginal)
+        renameActive = true
+        setCursor(DocPos(line, start))
+        setCursorWithAnchor(DocPos(line, end))
+        refreshRenameHighlights()
+        return true
+    }
+
+    /** Cancels the rename, restoring every occurrence of the original name. */
+    fun cancelRename() {
+        if (!renameActive) return
+        val line = renameLine
+        val start = renameStart
+        val original = renameOriginal
+        val current = renameName
+        renameActive = false
+        renameHighlightByLine = emptyMap()
+        val edits = ArrayList<EditorEdit>()
+        val lineText = buffer.line(line)
+        var end = start
+        while (end < lineText.length && isWord(lineText[end])) end++
+        if (end > start && lineText.substring(start, end) != original) {
+            edits.add(EditorEdit(DocPos(line, start), DocPos(line, end), original))
+        }
+        if (current.isNotEmpty() && current != original) {
+            for ((l, s0, e0) in renameOccurrences(current)) {
+                if (l == line && s0 == start) continue
+                edits.add(EditorEdit(DocPos(l, s0), DocPos(l, e0), original))
+            }
+        }
+        if (edits.isNotEmpty()) {
+            applyEdits(edits.sortedWith(compareByDescending<EditorEdit> { it.from.line }.thenByDescending { it.from.index }))
+        }
+        setCursor(DocPos(line, start + original.length))
+        invalidateAll()
+    }
+
+    /** Whole-word occurrences of [name] as (line, start, end). */
+    private fun renameOccurrences(name: String): List<Triple<Int, Int, Int>> {
+        if (name.isEmpty()) return emptyList()
+        val word = Regex("\\b" + Regex.escape(name) + "\\b")
+        val out = ArrayList<Triple<Int, Int, Int>>()
+        for (l in 0 until buffer.lineCount()) {
+            for (m in word.findAll(buffer.line(l))) {
+                out.add(Triple(l, m.range.first, m.range.last + 1))
+            }
+        }
+        return out
+    }
+
+    /** The symbol being edited plus every other occurrence, as highlights. */
+    private fun refreshRenameHighlights() {
+        val fill = withAlpha(palette[PaletteIndex.SELECTION], 0x30)
+        val border = withAlpha(palette[PaletteIndex.MATCHING_BRACKET_ACTIVE], 0x99)
+        val accent = withAlpha(palette[PaletteIndex.MATCHING_BRACKET_ACTIVE], 0xCC)
+        val list = ArrayList<EditorHighlight>(renameHits.size)
+        for ((l, s0, e0) in renameHits) {
+            val edited = l == renameLine && s0 == renameStart
+            list.add(
+                EditorHighlight(
+                    line = l,
+                    start = s0,
+                    end = e0,
+                    fill = fill,
+                    border = if (edited) accent else border,
+                    borderThickness = if (edited) 1.5f else 1f,
+                ),
+            )
+        }
+        renameHighlightByLine = list.groupBy { it.line }
+        invalidateAll()
+    }
+
+    /**
+     * Per-frame rename upkeep: follows the typed name into every other
+     * occurrence and finishes on Enter/Esc/a caret that left the symbol.
+     * Called from render(), before the keyboard is handled.
+     */
+    private fun updateRename() {
+        // The flag only lives for the frame that set it.
+        renameConsumedKeys = false
+        if (!renameActive) return
+        val line = renameLine
+        if (line < 0 || line >= buffer.lineCount()) {
+            renameActive = false
+            renameHighlightByLine = emptyMap()
+            return
+        }
+        if (ImGui.isKeyPressed(ImGuiKey.ESCAPE)) {
+            cancelRename()
+            renameConsumedKeys = true
+            return
+        }
+        val lineText = buffer.line(line)
+        var end = renameStart
+        while (end < lineText.length && isWord(lineText[end])) end++
+
+        // The editor hands arrows/Home/End to the overlay while renaming (the
+        // session is an overlay as far as keysReservedByOverlay is concerned),
+        // so the caret is moved here: VSCode lets you edit anywhere inside the
+        // name.
+        if (cursor.line == line) {
+            var moved: Int? = null
+            if (ImGui.isKeyPressed(ImGuiKey.LEFT_ARROW)) {
+                moved = (cursor.index - 1).coerceAtLeast(renameStart)
+            }
+            if (ImGui.isKeyPressed(ImGuiKey.RIGHT_ARROW)) {
+                moved = (cursor.index + 1).coerceAtMost(end)
+            }
+            if (ImGui.isKeyPressed(ImGuiKey.HOME)) moved = renameStart
+            if (ImGui.isKeyPressed(ImGuiKey.END)) moved = end
+            if (moved != null && moved != cursor.index) setCursor(DocPos(line, moved))
+        }
+
+        val typed = lineText.substring(renameStart, end)
+        if (ImGui.isKeyPressed(ImGuiKey.ENTER)) {
+            renameActive = false
+            renameConsumedKeys = true
+            renameHighlightByLine = emptyMap()
+            invalidateAll()
+            if (typed.isNotEmpty() && typed != renameOriginal) {
+                onRenameCommit?.invoke(line, renameStart, typed)
+            }
+            return
+        }
+        if (cursor.line != line || cursor.index < renameStart || cursor.index > end) {
+            // Clicking elsewhere commits, like VSCode.
+            renameActive = false
+            renameConsumedKeys = true
+            renameHighlightByLine = emptyMap()
+            invalidateAll()
+            if (typed.isNotEmpty() && typed != renameOriginal) {
+                onRenameCommit?.invoke(line, renameStart, typed)
+            }
+            return
+        }
+        if (typed != renameName && typed.isNotEmpty()) {
+            // Live linkage: rename every other occurrence.
+            val old = renameName
+            val edits = ArrayList<EditorEdit>()
+            for ((l, s0, e0) in renameOccurrences(old)) {
+                if (l == line && s0 == renameStart) continue
+                edits.add(EditorEdit(DocPos(l, s0), DocPos(l, e0), typed))
+            }
+            val caret = cursor
+            val delta = edits.count { it.from.line == line && it.from.index < caret.index } *
+                (typed.length - old.length)
+            if (edits.isNotEmpty()) {
+                applyEdits(
+                    edits.sortedWith(compareByDescending<EditorEdit> { it.from.line }.thenByDescending { it.from.index }),
+                )
+                setCursor(DocPos(caret.line, (caret.index + delta).coerceAtLeast(renameStart)))
+            }
+            renameName = typed
+            renameHits = renameOccurrences(typed)
+        }
+        refreshRenameHighlights()
+    }
 
     fun invalidateAll() {
         lineStates.clear()
@@ -768,6 +1283,7 @@ class Editor(
         // "active" when the window is focused OR the mouse hovers it. A
         // strict focus check breaks Enter/arrows when window focus lands on
         // the parent window after a click.
+        updateRename()
         if (isFocused) handleKeyboard()
         flushPendingText()
         // Scroll-follow only after keyboard navigation / edits / jumps;
@@ -783,7 +1299,10 @@ class Editor(
             // (content grew this frame; the scroll max updates next frame).
             ensureCursorVisible(followUp = followUp)
         }
+        markerTipHover = false
         drawText()
+        renderMarkerTipWindow()
+        renderFindPanel()
         renderFoldPreviewWindow()
 
         renderContextMenu()
@@ -1158,21 +1677,72 @@ class Editor(
         // content — but only while the pointer is inside the diagnostic's
         // underlined range (same span as the squiggle), not on the whole
         // line.
+        // Record the hovered diagnostic; renderMarkerTipWindow draws it as a
+        // real window (the pointer can move onto it and it can be resized,
+        // which a tooltip cannot).
         val marker = markers[line.coerceAtMost(buffer.lineCount() - 1)]
         if (overGutter && marker != null) {
-            ImGui.beginTooltip()
-            ImGui.text(marker.lineNumberTooltip ?: "line ${line + 1}")
-            ImGui.endTooltip()
+            markerTipText = marker.lineNumberTooltip ?: "line ${line + 1}"
+            markerTipHover = true
         } else if (!overGutter && marker?.textTooltip != null) {
             val ranges = marker.underlineRanges
             val insideRange = ranges.isNullOrEmpty() ||
                 ranges.any { pos.index >= it.first && pos.index < it.second }
             if (insideRange) {
-                ImGui.beginTooltip()
-                ImGui.text(marker.textTooltip)
-                ImGui.endTooltip()
+                markerTipText = marker.textTooltip
+                markerTipHover = true
             }
         }
+    }
+
+    /**
+     * Diagnostic tooltip as a regular window, like the documentation hover:
+     * the pointer may move onto it (it stays open) and it can be resized.
+     * Closing happens here once the pointer is on neither the squiggle nor
+     * the window.
+     */
+    private fun renderMarkerTipWindow() {
+        val text = markerTipText ?: return
+        val mouse = ImGui.getMousePos()
+        val onPopup = markerTipMin?.let { min ->
+            val max = markerTipMax ?: min
+            // Outset: ImGui's resize border sits just outside the rect.
+            val pad = 10f
+            mouse.x >= min.x - pad && mouse.x <= max.x + pad &&
+                mouse.y >= min.y - pad && mouse.y <= max.y + pad
+        } ?: false
+        val now = ImGui.getTime()
+        if (!markerTipHover && !onPopup) {
+            if (markerTipHideDeadline == 0.0) {
+                markerTipHideDeadline = now + 0.35
+            } else if (now >= markerTipHideDeadline) {
+                markerTipText = null
+                markerTipMin = null
+                markerTipMax = null
+                markerTipHideDeadline = 0.0
+                return
+            }
+        } else {
+            markerTipHideDeadline = 0.0
+        }
+        ImGui.setNextWindowPos(ImVec2(mouse.x + 16f, mouse.y + 20f), ImGuiCond.APPEARING)
+        ImGui.setNextWindowSize(ImVec2(360f, 0f), ImGuiCond.APPEARING)
+        ImGui.setNextWindowSizeConstraints(
+            ImVec2(200f, 0f),
+            ImVec2(720f, ImGui.getIO().displaySize.y * 0.5f),
+        )
+        ImGui.begin(
+            "##markerTip$uniqueId",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_MOVE or
+                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
+        ImGui.textWrapped(text)
+        val pos = ImGui.getWindowPos()
+        val size = ImGui.getWindowSize()
+        markerTipMin = pos
+        markerTipMax = ImVec2(pos.x + size.x, pos.y + size.y)
+        ImGui.end()
     }
 
     /**
@@ -1234,10 +1804,27 @@ class Editor(
     }
 
     private fun handleKeyboard() {
+        // The keyboard may belong to a text field instead of the document:
+        // either the editor's own find bar, or one of the host's fields (it
+        // declares that through [keyboardOwnedByHost]). Guessing from ImGui's
+        // io state instead disabled the editor's own keys entirely.
+        if (keyboardOwnedByHost || (findVisible && findSearchFocused)) return
         val shift = ImGui.isKeyDown(ImGuiKey.MOD_SHIFT)
         val ctrl = ImGui.isKeyDown(ImGuiKey.MOD_CTRL)
         val alt = ImGui.isKeyDown(ImGuiKey.MOD_ALT)
 
+        // Cmd/Ctrl+F opens find, Cmd/Ctrl+R also opens the replace row. The
+        // primary modifier is Cmd on macOS (ImGui's Ctrl/Super naming is not
+        // reliable across backends, so both are accepted).
+        val primary = ctrl || ImGui.isKeyDown(ImGuiKey.MOD_SUPER)
+        if (primary && ImGui.isKeyPressed(ImGuiKey.F, false)) {
+            openFind(withReplace = false)
+            return
+        }
+        if (primary && ImGui.isKeyPressed(ImGuiKey.R, false)) {
+            openFind(withReplace = true)
+            return
+        }
         if (ctrl && ImGui.isKeyPressed(ImGuiKey.Z)) {
             if (shift) redo() else undo()
             return
@@ -1690,6 +2277,43 @@ class Editor(
             if (text.isEmpty()) continue
             val y = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
 
+            // Host + find highlights sit between the line background and the
+            // glyphs.
+            val hostMarks = highlightsByLine[line]
+            val findMarks = findHighlightByLine[line]
+            val renameMarks = renameHighlightByLine[line]
+            if (hostMarks != null || findMarks != null || renameMarks != null) {
+                val marks = ArrayList<EditorHighlight>(
+                    (hostMarks?.size ?: 0) + (findMarks?.size ?: 0) + (renameMarks?.size ?: 0),
+                )
+                hostMarks?.let { marks.addAll(it) }
+                findMarks?.let { marks.addAll(it) }
+                renameMarks?.let { marks.addAll(it) }
+                val lineX = textStartX - scrollX
+                for (h in marks) {
+                    val from = h.start.coerceIn(0, text.length)
+                    val to = h.end.coerceIn(from, text.length)
+                    if (to <= from) continue
+                    val x0 = lineX + lineAdvance(line, from)
+                    val x1 = lineX + lineAdvance(line, to)
+                    drawList.DrawRectFilled(
+                        ImVec2(x0, y),
+                        ImVec2(x1, y + lineHeight),
+                        h.fill.toImGuiColor(),
+                    )
+                    h.border?.let { border ->
+                        drawList.DrawRect(
+                            ImVec2(x0, y),
+                            ImVec2(x1, y + lineHeight),
+                            border.toImGuiColor(),
+                            0f,
+                            0,
+                            h.borderThickness,
+                        )
+                    }
+                }
+            }
+
             // Indent guides: leading spaces as dots, leading tabs as
             // horizontal lines at the bottom of the line.
             if (showIndentGuides) {
@@ -1907,6 +2531,25 @@ class Editor(
 
                 // Per-token color blocks (one column per character).
                 val spans = spansOf(line)
+                if (spans.isEmpty()) {
+                    // No syntax/semantic spans (plain text, or a language the
+                    // host does not highlight): still draw the line's shape in
+                    // a muted text colour, so the minimap shows the document
+                    // instead of going blank.
+                    val first = text.indexOfFirst { !it.isWhitespace() }
+                    if (first >= 0) {
+                        val x0 = mmX + first * colW
+                        val x1 = (mmX + text.length * colW).coerceAtMost(mmX + mmW)
+                        if (x1 > x0) {
+                            drawList.DrawRectFilled(
+                                ImVec2(x0, y),
+                                ImVec2(x1, y + colH),
+                                palette[PaletteIndex.TEXT].toImGuiColor(),
+                            )
+                        }
+                    }
+                    continue
+                }
                 var col = 0
                 for (span in spans) {
                     val s = span.start.coerceIn(0, text.length)
@@ -2089,6 +2732,23 @@ data class EditorMarker(
     val underlineRanges: List<Pair<Int, Int>>? = null,
     val lineNumberTooltip: String? = null,
     val textTooltip: String? = null,
+)
+
+/**
+ * A background highlight: the character range [start, end) of [line] gets a
+ * translucent fill (and an optional border) drawn under the text, VSCode
+ * style. Rendered by the editor together with the text, so it scrolls,
+ * clips to the text area and stays aligned exactly like the glyphs.
+ */
+data class EditorHighlight(
+    val line: Int,
+    val start: Int,
+    val end: Int,
+    /** Packed 0xRRGGBBAA fill colour (translucency comes from the alpha). */
+    val fill: Color,
+    /** Optional packed border colour. */
+    val border: Color? = null,
+    val borderThickness: Float = 1f,
 )
 
 private fun isWord(c: Char): Boolean = c.isLetterOrDigit() || c == '_'

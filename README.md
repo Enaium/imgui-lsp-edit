@@ -30,8 +30,27 @@ references). A `DiffView` renders side-by-side diffs, and
 - Scroll-follow that never fights manual scrolling (keyboard/edits follow
   the cursor, wheel/scrollbar drags are left alone); opening a document
   never auto-scrolls.
+- Built-in find/replace bar (Cmd/Ctrl+F, Cmd/Ctrl+R for the replace row):
+  `Aa` / `ab` / `.*` toggles, live match counter, Enter / Shift+Enter
+  navigation, per-match and replace-all (one undo step each), regex `$n`
+  expansion, Esc to close. The bar owns the keyboard while focused.
+- Range background highlights: `EditorHighlight(line, start, end, fill,
+  border)` + `Editor.highlights` draws translucent fills with an optional
+  border under the glyphs — they scroll with the text, clip to the text area
+  (never the gutter or minimap) and are what the find bar uses.
+- In-place rename (`startRename` / `cancelRename` / `onRenameCommit`): the
+  symbol becomes the selection and is edited directly, arrows/Home/End move
+  inside the name, every other occurrence follows live, Enter commits (the
+  host performs the LSP rename), Esc restores everything.
+- Diagnostic tooltips render as regular windows (like the documentation
+  hover): the pointer can move onto them and they can be resized.
 - Callbacks for text edits (`onTextChange`), cursor moves, hover, token
   providers, code-lens clicks and breakpoints so hosts can plug in LSP data.
+  Hosts that implement some features themselves can chain instead of being
+  replaced: `onTextChange`, `onHover`, `onHoverEnd`, `onCodeLensClick` and
+  `keysReservedByOverlay` all call the previous handler first.
+- `lastChangeWasHistory` marks undo/redo notifications, so hosts can skip
+  typing-only reactions (a completion popup must not open mid-undo).
 - `queueTextInput` / `inputText` for host text-input routing, plus
   `isFocusedStrict` (keyboard focus only, excludes hover) for platform
   IME management.
@@ -55,11 +74,17 @@ references). A `DiffView` renders side-by-side diffs, and
 - Lifecycle: `initialize` / `notifyInitialized` / `shutdown` / `exit`,
   document sync (`didOpen` / `didChange` / `didClose`), server notifications
   (`publishDiagnostics`, `showMessage`, `logMessage`).
-- Requests: hover, completion, definition, references, prepareRename /
-  rename, signatureHelp, documentSymbols (hierarchical + flat), codeLens +
-  resolve, workspaceSymbols, semanticTokens/full, inlayHint, foldingRange,
-  formatting, typeDefinition, implementation, declaration, documentLinks,
-  selectionRange, pull diagnostics.
+- Requests: hover, completion (+ resolve), definition, references,
+  prepareRename / rename, signatureHelp, documentSymbols (hierarchical +
+  flat), codeLens + resolve, workspaceSymbols, semanticTokens/full,
+  inlayHint, foldingRange, formatting, typeDefinition, implementation,
+  declaration, documentLinks, selectionRange, pull diagnostics, codeAction +
+  resolve, executeCommand.
+- Server-initiated requests are answered: `workspace/applyEdit` (handlers
+  stack via `addApplyEditHandler`, the first that returns true wins),
+  `workspace/configuration` (null per requested section) and
+  `window/workDoneProgress/create`. Without the configuration answer
+  IntelliJ-based servers refuse to serve features such as inlay hints.
 - Bypasses lsp-kmp's broken `DocumentSymbolResult` array serializer by
   decoding the raw JSON element.
 
@@ -67,9 +92,23 @@ references). A `DiffView` renders side-by-side diffs, and
 
 - Document lifecycle and incremental `didChange` sync.
 - `publishDiagnostics` → gutter markers.
-- Hover tooltips (markdown, with fenced code blocks via `MarkdownCode`),
-  completion popup (detail + description), signature-help popup with the
+- Hover documentation as a resizable window offset to the lower right of the
+  pointer (markdown, with fenced code blocks via `MarkdownCode`): it stays
+  open while the pointer is on it and closes after a short grace period once
+  the pointer leaves both the code and the window.
+- Completion popup (detail + description), signature-help popup with the
   active parameter highlighted.
+- Code actions (Alt+Enter): `requestCodeActions()` lists quick fixes and
+  refactors in a caret-anchored, borderless, resizable popup
+  (`renderCodeActionPopup()`, Up/Down + Enter, Esc or click-outside closes).
+  An action's edit is applied directly; a server command is handed to
+  `onExecuteCommand`, whose edits then arrive as `workspace/applyEdit`.
+- `features: Set<LspFeature>` selects what an instance drives
+  (`DIAGNOSTICS`, `COMPLETION`, `HOVER`, `CODE_ACTIONS`, `SEMANTIC_TOKENS`,
+  `INLAY_HINTS`, `CODE_LENS`, `DOCUMENT_SYNC`). A host that still implements
+  some capabilities itself enables only the rest while it migrates — the
+  editor then leaves the client's notification slots and the editor's
+  `tokenProvider` untouched instead of replacing the host's.
 - Go-to-definition / type-definition / implementation, code-lens
   fetch/resolve/click dispatch, rename and references host hooks.
 - Full-document semantic tokens, folding ranges, inlay hints — refreshed

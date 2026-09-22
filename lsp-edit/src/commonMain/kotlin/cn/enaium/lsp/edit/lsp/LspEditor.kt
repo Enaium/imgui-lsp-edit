@@ -1,13 +1,16 @@
 package cn.enaium.lsp.edit.lsp
 
 import cn.enaium.imgui.ImGui
+import cn.enaium.imgui.ImGuiCond
 import cn.enaium.imgui.ImGuiKey
+import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
 import cn.enaium.imgui.ImVec4
 import cn.enaium.imgui.extensions.markdown.Markdown
 import cn.enaium.imgui.extensions.markdown.MarkdownConfigHandle
 import cn.enaium.imgui.extensions.markdown.MdFormatFlags
 import cn.enaium.lsp.model.*
+import kotlinx.serialization.json.JsonElement
 import cn.enaium.lsp.edit.DocPos
 import cn.enaium.lsp.edit.Editor
 import cn.enaium.lsp.edit.EditorCodeLens
@@ -25,6 +28,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.math.min
 
@@ -43,11 +47,35 @@ import kotlin.math.min
  * results are marshalled back onto the render thread via [drain], which the
  * host must call every frame before rendering the editor.
  */
+/** Server-driven capabilities an [LspEditor] can drive. */
+enum class LspFeature {
+    DIAGNOSTICS,
+    COMPLETION,
+    HOVER,
+    CODE_ACTIONS,
+    SEMANTIC_TOKENS,
+    /** didOpen/didChange/didSave/didClose for this document. */
+    DOCUMENT_SYNC,
+    INLAY_HINTS,
+    CODE_LENS,
+    ;
+
+    companion object {
+        val ALL: Set<LspFeature> = entries.toSet()
+    }
+}
+
 class LspEditor(
     val editor: Editor,
     val client: LspClient,
     val uri: String,
     val languageId: String,
+    /**
+     * Which server-driven features this instance drives. A host that still
+     * implements some of them itself can enable only the rest while it
+     * migrates (e.g. `setOf(LspFeature.CODE_ACTIONS)`).
+     */
+    val features: Set<LspFeature> = LspFeature.ALL,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AutoCloseable {
 
@@ -66,6 +94,8 @@ class LspEditor(
     private val pendingMessages = Channel<MessageParams>(Channel.UNLIMITED)
     private val pendingGoto = Channel<DocPos>(Channel.UNLIMITED)
     private val pendingFormat = Channel<List<TextEdit>>(Channel.UNLIMITED)
+    private val pendingCodeActions = Channel<List<CodeAction>>(Channel.UNLIMITED)
+    private val pendingWorkspaceEdits = Channel<WorkspaceEdit>(Channel.UNLIMITED)
 
     private fun enqueueDiagnostics(params: PublishDiagnosticsParams) {
         pendingDiagnostics.trySend(params)
@@ -86,6 +116,12 @@ class LspEditor(
     @Volatile
     private var hoverResult: Hover? = null
 
+    /** True while the pointer is over hoverable code (set by onHover). */
+    private var hoverOnCode = false
+    private var hoverTipMin: ImVec2? = null
+    private var hoverTipMax: ImVec2? = null
+    private var hoverTipHideDeadline = 0.0
+
     @Volatile
     private var hoverPosition: DocPos? = null
 
@@ -94,7 +130,30 @@ class LspEditor(
 
     /** True while the completion popup is open (see [renderCompletionPopup]). */
     var completionActive = false
+
+    // ---- code actions (Alt+Enter) ----
+
+    /** True while the code-action list is open (see [renderCodeActionPopup]). */
+    var codeActionsActive = false
         private set
+
+    private var codeActionItems: List<CodeAction> = emptyList()
+
+    /** Rect (pos, size) of the last rendered code-action popup; test aid. */
+    var lastCodeActionPopupRect: Pair<ImVec2, ImVec2>? = null
+        private set
+    private var codeActionSelected = 0
+    private var codeActionAnchor: DocPos? = null
+    private var codeActionRequestSeq = 0L
+
+    /** Diagnostics of this document, used as the code-action context. */
+    private var currentDiagnostics: List<Diagnostic> = emptyList()
+
+    /**
+     * Host hook: run a code action's server command. The server performs the
+     * edit and asks for it back through `workspace/applyEdit`.
+     */
+    var onExecuteCommand: ((command: String, arguments: List<JsonElement>?) -> Unit)? = null
     private var completionItems: List<CompletionItem> = emptyList()
     private var completionSelected = 0
     private var lastScrollSelected = -1
@@ -168,48 +227,102 @@ class LspEditor(
         processId: Int? = null,
         rootUri: String? = null,
         clientName: String = "lsp-edit",
+        /**
+         * False when the host already ran initialize/initialized and the
+         * receive loop on this client (it owns the server connection); only
+         * the feature wiring below is set up then.
+         */
+        initializeConnection: Boolean = true,
     ) {
         // The receive loop must run before any request is sent, otherwise
         // initialize() would wait forever for a response nobody reads.
-        client.startListening()
+        if (initializeConnection) client.startListening()
 
-        client.onPublishDiagnostics { params ->
-            enqueueDiagnostics(params)
+        // Only take the notification slots this instance actually serves: a
+        // client has one handler per notification, so registering here would
+        // silently replace the host's own (that is how the IDE lost its
+        // diagnostics while the editor only wanted code actions).
+        if (LspFeature.DIAGNOSTICS in features) {
+            client.onPublishDiagnostics { params -> enqueueDiagnostics(params) }
         }
-        client.onShowMessage { params ->
-            enqueueMessage(params)
-        }
-        client.onLogMessage { params ->
-            enqueueMessage(params)
+        if (LspFeature.DIAGNOSTICS in features) {
+            client.onShowMessage { params -> enqueueMessage(params) }
+            client.onLogMessage { params -> enqueueMessage(params) }
         }
 
-        val result = client.initialize(
-            processId = processId,
-            rootUri = rootUri,
-            clientName = clientName,
-        )
-        serverCapabilities = result.capabilities
-        client.notifyInitialized()
+        if (initializeConnection) {
+            val result = client.initialize(
+                processId = processId,
+                rootUri = rootUri,
+                clientName = clientName,
+            )
+            serverCapabilities = result.capabilities
+            client.notifyInitialized()
+        }
 
         // Wire the widget to the server.
-        editor.onTextChange = { ops -> onEdit(ops) }
-        editor.onHover = { pos -> onHover(pos) }
-        editor.onHoverEnd = {
+        // Chain, never replace: the host's own onTextChange (dirty tracking,
+        // saves, its own document sync) must keep running.
+        val previousTextChange = editor.onTextChange
+        editor.onTextChange = { ops ->
+            previousTextChange?.invoke(ops)
+            if (LspFeature.DOCUMENT_SYNC in features) onEdit(ops)
+        }
+        val previousHover = editor.onHover
+        editor.onHover = { pos ->
+            previousHover?.invoke(pos)
+            hoverOnCode = true
+            if (LspFeature.HOVER in features) onHover(pos)
+        }
+        val previousHoverEnd = editor.onHoverEnd
+        editor.onHoverEnd = end@{
+            previousHoverEnd?.invoke()
             // Mouse left the editor (or a click landed): drop any hover
             // content so the tooltip disappears.
+            if (LspFeature.HOVER !in features) return@end
+            // Do NOT drop the result here: the popup stays open while the
+            // pointer is on it, and closes itself in renderHoverTooltip.
+            hoverOnCode = false
             hoverRequestSeq++
             hoverJob?.cancel()
-            hoverResult = null
             hoverPosition = null
             hoverInFlight = false
         }
-        editor.tokenProvider = ::semanticTokenSpansFor
-        editor.inlayHintsProvider = ::inlayHintsFor
-        editor.codeLensProvider = ::codeLensesFor
-        editor.onCodeLensClick = ::handleCodeLensClick
+        // Same rule as the notifications: the token provider feeds the whole
+        // syntax/semantic pipeline (and the minimap), so only claim it when
+        // this instance really serves semantic tokens.
+        if (LspFeature.SEMANTIC_TOKENS in features) {
+            editor.tokenProvider = ::semanticTokenSpansFor
+        }
+        if (LspFeature.INLAY_HINTS in features) editor.inlayHintsProvider = ::inlayHintsFor
+        if (LspFeature.CODE_LENS in features) {
+            editor.codeLensProvider = ::codeLensesFor
+            val previousLensClick = editor.onCodeLensClick
+            editor.onCodeLensClick = { lens ->
+                previousLensClick?.invoke(lens)
+                handleCodeLensClick(lens)
+            }
+        }
         // While the completion popup is open, Up/Down/Enter/Tab navigate and
         // accept in the popup instead of moving the caret / editing.
-        editor.keysReservedByOverlay = { completionActive }
+        // Alt+Enter opens code actions; the editor must not insert a newline
+        // for it (and while a popup owns the keyboard, neither should it).
+        // Server-initiated edits (code-action commands, organize imports, ...)
+        // are applied to this document; the marshalled list keeps the edit on
+        // the render thread.
+        client.addApplyEditHandler { edit ->
+            pendingWorkspaceEdits.trySend(edit)
+            true
+        }
+        val previousKeysReserved = editor.keysReservedByOverlay
+        editor.keysReservedByOverlay = {
+            previousKeysReserved?.invoke() == true ||
+                completionActive || codeActionsActive ||
+                // Enter commits the rename; without this the editor inserted a
+                // newline instead.
+                editor.renameActive || editor.renameConsumedKeys ||
+                altDown()
+        }
 
         open()
     }
@@ -219,12 +332,16 @@ class LspEditor(
         version = 0
         val text = editor.getText()
         client.didOpen(uri, languageId, version, text)
-        semanticSpans = null
-        requestSemanticTokens()
-        inlayHints = null
-        requestInlayHints()
+        if (LspFeature.SEMANTIC_TOKENS in features) {
+            semanticSpans = null
+            requestSemanticTokens()
+        }
+        if (LspFeature.INLAY_HINTS in features) {
+            inlayHints = null
+            requestInlayHints()
+        }
         requestFoldingRanges()
-        requestCodeLenses()
+        if (LspFeature.CODE_LENS in features) requestCodeLenses()
         requestDocumentSymbols()
     }
 
@@ -261,12 +378,22 @@ class LspEditor(
             }
         }
         version++
-        client.didChange(uri, version, changes)
-        maybeTriggerCompletion(ops)
-        requestSemanticTokens()
-        requestInlayHints()
+        try {
+            client.didChange(uri, version, changes)
+        } catch (_: Throwable) {
+            // The connection may be gone (server exited); a document sync
+            // failure must never take the host's render loop down.
+            return
+        }
+        // An undo is not typing: opening the popup for it strands the
+        // keyboard on a list the user never asked for.
+        if (LspFeature.COMPLETION in features && !editor.lastChangeWasHistory) {
+            maybeTriggerCompletion(ops)
+        }
+        if (LspFeature.SEMANTIC_TOKENS in features) requestSemanticTokens()
+        if (LspFeature.INLAY_HINTS in features) requestInlayHints()
         requestFoldingRanges()
-        requestCodeLenses()
+        if (LspFeature.CODE_LENS in features) requestCodeLenses()
         requestDocumentSymbols()
     }
 
@@ -315,7 +442,7 @@ class LspEditor(
     fun drain() {
         while (true) {
             val params = pendingDiagnostics.tryReceive().getOrNull() ?: break
-            applyDiagnostics(params)
+            if (LspFeature.DIAGNOSTICS in features) applyDiagnostics(params)
         }
         while (true) {
             val msg = pendingMessages.tryReceive().getOrNull() ?: break
@@ -329,10 +456,27 @@ class LspEditor(
             val edits = pendingFormat.tryReceive().getOrNull() ?: break
             applyFormatEdits(edits)
         }
+        // Alt+Enter: code actions for the caret (VSCode / IntelliJ shortcut).
+        if (altDown() && !completionActive && !codeActionsActive &&
+            ImGui.isKeyPressed(ImGuiKey.ENTER, false)
+        ) {
+            requestCodeActions()
+        }
+        while (true) {
+            val edit = pendingWorkspaceEdits.tryReceive().getOrNull() ?: break
+            applyWorkspaceEdit(edit)
+        }
+        while (true) {
+            val actions = pendingCodeActions.tryReceive().getOrNull() ?: break
+            codeActionItems = actions
+            codeActionSelected = 0
+            codeActionsActive = actions.isNotEmpty()
+        }
     }
 
     private fun applyDiagnostics(params: PublishDiagnosticsParams) {
         if (params.uri != uri) return
+        currentDiagnostics = params.diagnostics
         editor.markers.clear()
         for (d in params.diagnostics) {
             val severity = d.severity ?: DiagnosticSeverity.Error
@@ -392,13 +536,50 @@ class LspEditor(
     fun renderHoverTooltip() {
         val h = hoverResult ?: return
         val text = hoverContents(h)
-        if (text.isNullOrEmpty()) return
-        // The markdown renderer wraps at the window's content width, but a
-        // tooltip auto-sizes to its content and starts out ~0 px wide —
-        // which would wrap every word onto its own line. Constrain the
-        // tooltip to a minimum width so lines break at a readable measure.
-        ImGui.setNextWindowSizeConstraints(ImVec2(320f, 0f), ImVec2(Float.MAX_VALUE, Float.MAX_VALUE))
-        ImGui.beginTooltip()
+        if (text.isNullOrEmpty()) {
+            hoverResult = null
+            return
+        }
+        val mouse = ImGui.getMousePos()
+        val onPopup = hoverTipMin?.let { min ->
+            val max = hoverTipMax ?: min
+            // Outset: ImGui's resize border sits just outside the rect, and
+            // the popup is offset from the pointer — without the padding a
+            // move towards it counted as "left" and it vanished.
+            val pad = 12f
+            mouse.x >= min.x - pad && mouse.x <= max.x + pad &&
+                mouse.y >= min.y - pad && mouse.y <= max.y + pad
+        } ?: false
+        val now = ImGui.getTime()
+        if (!hoverOnCode && !onPopup) {
+            // Grace period: the popup is offset from the pointer, so closing
+            // immediately made it vanish while the pointer crossed the gap.
+            if (hoverTipHideDeadline == 0.0) {
+                hoverTipHideDeadline = now + 0.35
+            } else if (now >= hoverTipHideDeadline) {
+                hoverResult = null
+                hoverTipMin = null
+                hoverTipMax = null
+                hoverTipHideDeadline = 0.0
+                return
+            }
+        } else {
+            hoverTipHideDeadline = 0.0
+        }
+        // Offset to the lower right of the pointer: sitting exactly under it
+        // swallowed right-clicks and hid the text being inspected.
+        ImGui.setNextWindowPos(ImVec2(mouse.x + 16f, mouse.y + 20f), ImGuiCond.APPEARING)
+        ImGui.setNextWindowSize(ImVec2(440f, 0f), ImGuiCond.APPEARING)
+        ImGui.setNextWindowSizeConstraints(
+            ImVec2(320f, 0f),
+            ImVec2(760f, ImGui.getIO().displaySize.y * 0.6f),
+        )
+        ImGui.begin(
+            "##hover${editor.uniqueId}",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_MOVE or
+                ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
         // Fenced code blocks in hover markdown render as read-only,
         // syntax-highlighted blocks (theme palette, no line numbers).
         cn.enaium.lsp.edit.MarkdownCode.render(
@@ -407,7 +588,11 @@ class LspEditor(
             language = editor.language,
             palette = editor.palette,
         )
-        ImGui.endTooltip()
+        val pos = ImGui.getWindowPos()
+        val size = ImGui.getWindowSize()
+        hoverTipMin = pos
+        hoverTipMax = ImVec2(pos.x + size.x, pos.y + size.y)
+        ImGui.end()
     }
 
     private fun hoverContents(h: Hover): String? = when (val c = h.contents) {
@@ -429,6 +614,7 @@ class LspEditor(
      * for Ctrl+Space.
      */
     fun requestCompletion() {
+        if (LspFeature.COMPLETION !in features) return
         completionDirty = true
         if (completionRequest?.isActive == true) return
         completionRequest = scope.launch {
@@ -491,9 +677,160 @@ class LspEditor(
         }
     }
 
+    /**
+     * Requests the code actions for the caret (quick fixes for the diagnostics
+     * under it, plus refactors) and opens the list.
+     */
+    fun requestCodeActions() {
+        val pos = editor.cursor
+        codeActionAnchor = pos
+        codeActionRequestSeq++
+        val seq = codeActionRequestSeq
+        val diagnostics = currentDiagnostics.filter { d ->
+            val r = d.range
+            val afterStart = pos.line > r.start.line ||
+                (pos.line == r.start.line && pos.index >= r.start.character)
+            val beforeEnd = pos.line < r.end.line ||
+                (pos.line == r.end.line && pos.index <= r.end.character)
+            afterStart && beforeEnd
+        }
+        scope.launch {
+            val position = LspClient.toPosition(pos)
+            val actions = client.codeAction(uri, Range(position, position), diagnostics) ?: emptyList()
+            if (seq == codeActionRequestSeq) pendingCodeActions.trySend(actions)
+        }
+    }
+
+    /** Closes the code-action list. */
+    fun closeCodeActions() {
+        codeActionsActive = false
+        codeActionItems = emptyList()
+        codeActionAnchor = null
+    }
+
+    /**
+     * Renders the code-action list (called inside the editor child, e.g. from
+     * the editor's overlay hook). Up/Down navigate, Enter applies, Esc or a
+     * click outside dismisses.
+     */
+    fun renderCodeActionPopup() {
+        if (!codeActionsActive) return
+        // Anchored to the caret exactly like the completion popup (the host
+        // position API describes the overlay space, not this window's).
+        val x = editor.caretScreenX()
+        val y = editor.caretScreenY()
+        ImGui.setNextWindowPos(ImVec2(x, y + editor.lineHeightPx()))
+        // Resizable (no NO_RESIZE): the first size applies on appearing, after
+        // that the user may drag it like any window.
+        ImGui.setNextWindowSize(ImVec2(360f, 0f), ImGuiCond.APPEARING)
+        ImGui.setNextWindowSizeConstraints(
+            ImVec2(280f, 0f),
+            ImVec2(760f, ImGui.getIO().displaySize.y * 0.5f),
+        )
+        ImGui.begin(
+            "##codeActions${editor.uniqueId}",
+            null,
+            ImGuiWindowFlags.NO_TITLE_BAR or
+                ImGuiWindowFlags.NO_MOVE or ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or
+                ImGuiWindowFlags.NO_NAV_FOCUS,
+        )
+        if (ImGui.isKeyPressed(ImGuiKey.UP_ARROW)) {
+            codeActionSelected = (codeActionSelected - 1 + codeActionItems.size) % codeActionItems.size
+        }
+        if (ImGui.isKeyPressed(ImGuiKey.DOWN_ARROW)) {
+            codeActionSelected = (codeActionSelected + 1) % codeActionItems.size
+        }
+        if (ImGui.isKeyPressed(ImGuiKey.ENTER)) {
+            codeActionItems.getOrNull(codeActionSelected)?.let { applyCodeAction(it) }
+            closeCodeActions()
+            ImGui.end()
+            return
+        }
+        // Click-outside dismisses — but ImGui's resize border sits just
+        // OUTSIDE the window rect, so a plain isWindowHovered() test counted
+        // grabbing the resize grip as "outside" and closed the popup. Outset
+        // the rect like the fold preview does.
+        val popupMin = ImGui.getWindowPos()
+        val popupSize = ImGui.getWindowSize()
+        val mouse = ImGui.getMousePos()
+        val pad = 10f
+        val outside = mouse.x < popupMin.x - pad || mouse.x > popupMin.x + popupSize.x + pad ||
+            mouse.y < popupMin.y - pad || mouse.y > popupMin.y + popupSize.y + pad
+        if (ImGui.isKeyPressed(ImGuiKey.ESCAPE) || (ImGui.isMouseClicked(0) && outside)) {
+            closeCodeActions()
+            ImGui.end()
+            return
+        }
+        lastCodeActionPopupRect = ImGui.getWindowPos() to ImGui.getWindowSize()
+        for ((i, action) in codeActionItems.withIndex()) {
+            val label = action.title + if (action.isPreferred == true) "  (preferred)" else ""
+            val enabled = action.disabled == null
+            if (ImGui.selectable("$label##codeAction$i${editor.uniqueId}", i == codeActionSelected) && enabled) {
+                applyCodeAction(action)
+                closeCodeActions()
+                ImGui.end()
+                return
+            }
+        }
+        ImGui.end()
+    }
+
+    /** Applies a code action: its edit directly, otherwise its server command. */
+    private fun applyCodeAction(action: CodeAction) {
+        val edit = action.edit
+        if (edit != null) {
+            applyWorkspaceEdit(edit)
+            return
+        }
+        val command = action.command
+        if (command != null) {
+            onExecuteCommand?.invoke(command.command, command.arguments)
+            return
+        }
+        if (action.data != null) {
+            // Lazily filled: resolve, then apply whatever comes back.
+            scope.launch {
+                val resolved = client.codeActionResolve(action) ?: return@launch
+                val edit = resolved.edit
+                if (edit != null) pendingWorkspaceEdits.trySend(edit)
+            }
+        }
+    }
+
+    /** Applies a workspace edit to this document (bottom-up, one undo step). */
+    private fun applyWorkspaceEdit(edit: WorkspaceEdit) {
+        val changes = edit.changes?.get(uri) ?: return
+        if (changes.isEmpty()) return
+        closeCompletion()
+        suppressCompletionTrigger = true
+        try {
+            val sorted = changes.sortedWith(
+                compareByDescending<TextEdit> { it.range.start.line }
+                    .thenByDescending { it.range.start.character },
+            )
+            for (e in sorted) {
+                val start = LspClient.toDocPos(e.range.start)
+                val end = LspClient.toDocPos(e.range.end)
+                if (e.newText.isEmpty()) {
+                    editor.eraseRange(start, end)
+                } else {
+                    editor.setCursor(start)
+                    editor.setCursorWithAnchor(end)
+                    editor.replaceSelection(e.newText)
+                }
+            }
+        } finally {
+            suppressCompletionTrigger = false
+        }
+    }
+
+    /** True while a physical Alt/Option key is held. */
+    private fun altDown(): Boolean =
+        ImGui.isKeyDown(ImGuiKey.LEFT_ALT) || ImGui.isKeyDown(ImGuiKey.RIGHT_ALT)
+
     /** Renders the completion popup overlay (called inside the editor child). */
     fun renderCompletionPopup() {
-        if (!completionActive) return
+        if (LspFeature.COMPLETION !in features || !completionActive) return
         val pos = editor.cursor
         val anchor = completionAnchor ?: return
         // The popup follows the caret, but an accept replaces [anchor, pos):

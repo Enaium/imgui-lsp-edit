@@ -41,8 +41,11 @@ object MarkdownCode {
         palette: Array<Color> = EditorPalette.dark,
     ) {
         val segments = splitFencedBlocks(markdown)
-        if (segments.size == 1) {
-            // No fenced blocks: render the prose with inline-code chips.
+        // "One segment" does NOT mean "no code block": a document that is a
+        // single fenced block also yields one segment. Only a lone Prose goes
+        // down the inline-chip path (otherwise the fence markers were
+        // rendered as inline code and the block lost its highlighting).
+        if (segments.size == 1 && segments[0] is Prose) {
             renderProseWithInlineCode(config, markdown, palette)
             return
         }

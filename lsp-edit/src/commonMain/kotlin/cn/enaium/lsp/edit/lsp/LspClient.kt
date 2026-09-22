@@ -64,13 +64,17 @@ class LspClient(
         clientName: String = "lsp-edit",
         clientVersion: String? = null,
         capabilities: ClientCapabilities = defaultClientCapabilities(),
+        workspaceFolders: List<WorkspaceFolder>? = null,
+        trace: String? = null,
     ): InitializeResult {
         val params = InitializeParams(
             processId = processId,
             rootPath = rootPath,
             rootUri = rootUri,
+            workspaceFolders = workspaceFolders,
             capabilities = capabilities,
             clientInfo = ClientInfo(clientName, clientVersion),
+            trace = trace,
         )
         val result = launcher.request(
             "initialize",
@@ -89,10 +93,60 @@ class LspClient(
         initialized = true
     }
 
-    /** Start the receive loop (blocks the calling coroutine/thread). */
+    /**
+     * Server-initiated workspace edits (`workspace/applyEdit`): code-action
+     * commands, organize-imports, ... The handler returns whether the edit was
+     * applied. Without one the server is told `applied = false`.
+     */
+    private val applyEditHandlers = mutableListOf<(WorkspaceEdit) -> Boolean>()
+
+    /**
+     * Registers a `workspace/applyEdit` handler; the first one that returns
+     * true wins. Handlers stack instead of replacing each other, so a host
+     * and an [cn.enaium.lsp.edit.lsp.LspEditor] bound to the same client both
+     * get their say.
+     */
+    fun addApplyEditHandler(handler: (WorkspaceEdit) -> Boolean) {
+        applyEditHandlers.add(handler)
+    }
+
+    /** Convenience for hosts that only ever register one handler. */
+    var onApplyEdit: ((WorkspaceEdit) -> Boolean)?
+        get() = applyEditHandlers.firstOrNull()
+        set(value) {
+            applyEditHandlers.clear()
+            if (value != null) applyEditHandlers.add(value)
+        }
+
+    /**
+     * Start the receive loop (blocks the calling coroutine/thread). Registers
+     * the server-initiated requests first: a server that gets "method not
+     * found" for `workspace/configuration` refuses to serve features such as
+     * inlay hints.
+     */
     fun startListening() {
+        registerServerRequests()
         scope.launch {
             launcher.listen()
+        }
+    }
+
+    private fun registerServerRequests() {
+        launcher.onRequestJson("workspace/applyEdit", ApplyWorkspaceEditParams.serializer()) { params ->
+            val applied = applyEditHandlers.any { it(params.edit) }
+            kotlinx.serialization.json.buildJsonObject {
+                put("applied", kotlinx.serialization.json.JsonPrimitive(applied))
+            }
+        }
+        // null per requested section: the server keeps its defaults.
+        launcher.onRequestJson("workspace/configuration", JsonElement.serializer()) { params ->
+            val count = (params as? kotlinx.serialization.json.JsonObject)
+                ?.get("items")?.let { it as? kotlinx.serialization.json.JsonArray }?.size ?: 0
+            kotlinx.serialization.json.JsonArray(List(count) { kotlinx.serialization.json.JsonNull })
+        }
+        // Acknowledging is all the client must do.
+        launcher.onRequestJson("window/workDoneProgress/create", JsonElement.serializer()) { _ ->
+            kotlinx.serialization.json.JsonNull
         }
     }
 
@@ -141,6 +195,20 @@ class LspClient(
         )
     }
 
+    /** `\$/progress` work-done notifications (server-side task progress). */
+    fun onProgress(handler: (ProgressParams) -> Unit) {
+        launcher.onNotification(
+            "\$/progress",
+            ProgressParams.serializer(),
+            handler,
+        )
+    }
+
+    /** Any other server notification, by method name (vendor extensions). */
+    fun onCustomNotification(method: String, handler: (JsonElement) -> Unit) {
+        launcher.onNotification(method, JsonElement.serializer(), handler)
+    }
+
     fun onLogMessage(handler: (MessageParams) -> Unit) {
         launcher.onNotification(
             "window/logMessage",
@@ -177,6 +245,15 @@ class LspClient(
     }
 
     /** Closes the document. */
+    /** Saves a document (optionally including its text). */
+    fun didSave(uri: String, text: String? = null) {
+        val params = DidSaveTextDocumentParams(
+            textDocument = TextDocumentIdentifier(uri),
+            text = text,
+        )
+        launcher.notify("textDocument/didSave", params, DidSaveTextDocumentParams.serializer())
+    }
+
     fun didClose(uri: String) {
         val params = DidCloseTextDocumentParams(
             textDocument = TextDocumentIdentifier(uri),
@@ -402,6 +479,91 @@ class LspClient(
             throw e
         } catch (_: Exception) {
             null
+        }
+
+    /** Fills in a completion item (additionalTextEdits, documentation). */
+    suspend fun completionResolve(item: CompletionItem): CompletionItem? =
+        try {
+            requestMutex.withLock {
+                withTimeout(15_000) {
+                    launcher.request(
+                        "completionItem/resolve",
+                        item,
+                        CompletionItem.serializer(),
+                        CompletionItem.serializer(),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Code actions (quick fixes, refactors) available over [range]. */
+    suspend fun codeAction(
+        uri: String,
+        range: Range,
+        diagnostics: List<Diagnostic>,
+    ): List<CodeAction>? =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "textDocument/codeAction",
+                        CodeActionParams(
+                            textDocument = TextDocumentIdentifier(uri),
+                            range = range,
+                            context = CodeActionContext(diagnostics = diagnostics),
+                        ),
+                        CodeActionParams.serializer(),
+                        ListSerializer(CodeAction.serializer()),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Fills in a lazily-resolved code action (its edit/command). */
+    suspend fun codeActionResolve(action: CodeAction): CodeAction? =
+        try {
+            requestMutex.withLock {
+                withTimeout(15_000) {
+                    launcher.request(
+                        "codeAction/resolve",
+                        action,
+                        CodeAction.serializer(),
+                        CodeAction.serializer(),
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Runs a server command; the server's edits arrive as workspace/applyEdit. */
+    suspend fun executeCommand(command: String, arguments: List<JsonElement>?): Boolean =
+        try {
+            requestMutex.withLock {
+                withTimeout(30_000) {
+                    launcher.request(
+                        "workspace/executeCommand",
+                        ExecuteCommandParams(command = command, arguments = arguments),
+                        ExecuteCommandParams.serializer(),
+                        JsonElement.serializer(),
+                    )
+                }
+                true
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
         }
 
     /** Checks whether the symbol at [position] can be renamed. */
