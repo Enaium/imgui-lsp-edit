@@ -57,6 +57,15 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.imgui.kmp)
             implementation(libs.lsp.kmp)
+            // The published POM depends on every letter group, but
+            // xicons-imgui-intellij-g was never published (Maven Central has
+            // a..z minus g), which fails resolution outright — hence exclude.
+            // Letter groups compile against core but do not re-export it
+            // (Icon/IconData live there), so it is declared explicitly.
+            implementation(libs.xicons.imgui.core)
+            implementation(libs.xicons.imgui.intellij.get().toString()) {
+                exclude(group = "cn.enaium.xicons", module = "xicons-imgui-intellij-g")
+            }
         }
         // Tree-sitter parsing core (Maven Central); language grammars are
         // supplied by the host (e.g. tree-sitter-languages-kmp). ktreesitter

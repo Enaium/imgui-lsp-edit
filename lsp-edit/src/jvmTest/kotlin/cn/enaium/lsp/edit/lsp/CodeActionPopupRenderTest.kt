@@ -2,6 +2,7 @@ package cn.enaium.lsp.edit.lsp
 
 import cn.enaium.imgui.ImFontConfig
 import cn.enaium.imgui.ImGui
+import cn.enaium.imgui.ImTextureID
 import cn.enaium.imgui.ImVec2
 import cn.enaium.lsp.LanguageServer
 import cn.enaium.lsp.LanguageServerLauncher
@@ -62,7 +63,7 @@ class CodeActionPopupRenderTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
             ImGui.newFrame()
 
             val pair = InMemoryTransportPair()

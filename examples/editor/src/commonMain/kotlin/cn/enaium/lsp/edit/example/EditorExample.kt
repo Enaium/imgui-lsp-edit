@@ -8,6 +8,7 @@ import cn.enaium.imgui.backends.sdl.ImGuiSdlBackend
 import cn.enaium.imgui.backends.sdl.ImGuiSdlRendererBackend
 import cn.enaium.lsp.edit.DocPos
 import cn.enaium.lsp.edit.Editor
+import cn.enaium.lsp.edit.EditorFontSettings
 import cn.enaium.lsp.edit.Language
 import cn.enaium.lsp.edit.lsp.InMemoryTransportPair
 import cn.enaium.lsp.edit.dap.DapClient
@@ -37,18 +38,25 @@ import kotlinx.coroutines.launch
  * pass `--frames N` / `IMGUI_KMP_FRAMES=N` to exit after N frames (headless
  * CI runs).
  */
-fun runLspEditorExample(frames: Int = Int.MAX_VALUE, fallbackFontPath: String? = null) {
+fun runLspEditorExample(
+    frames: Int = Int.MAX_VALUE,
+    mainFontPath: String? = null,
+    fallbackFontPath: String? = null,
+) {
     var app: LspEditorApp? = null
     SdlRendererApp.run(
         title = "lsp-edit example",
         frames = frames,
-        // 10px variant of the editor font for inlay hints.
-        extraFontSizePx = 10f,
-        // Merge a fallback font (e.g. a CJK font) so glyphs the main font
-        // lacks still render; pass null to disable.
-        fallbackFontPath = fallbackFontPath,
-        init = { extraFont ->
-            app = LspEditorApp().apply { editor.inlayHintFont = extraFont }
+        // Editor faces: the main font (built-in when null) with a fallback
+        // merged in for the glyphs it lacks (e.g. a CJK font), plus a 10px
+        // variant for inlay hints.
+        fontSettings = EditorFontSettings(
+            mainFontPath = mainFontPath,
+            fallbackFontPath = fallbackFontPath,
+            smallSizePx = 10f,
+        ),
+        init = { smallFont ->
+            app = LspEditorApp().apply { editor.inlayHintFont = smallFont }
         },
         draw = { frame -> app?.draw(frame) },
         close = { app?.close() },

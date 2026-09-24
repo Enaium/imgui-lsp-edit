@@ -1,6 +1,5 @@
 package cn.enaium.lsp.edit.example
 
-import cn.enaium.imgui.ImFontConfig
 import cn.enaium.imgui.ImGui
 import cn.enaium.imgui.backends.sdl.ImGuiSdlBackend
 import cn.enaium.imgui.backends.sdl.ImGuiSdlRendererBackend
@@ -8,6 +7,8 @@ import cn.enaium.sdl.SDL
 import cn.enaium.sdl.SDLColor
 import cn.enaium.sdl.SDLInitFlags
 import cn.enaium.sdl.SDLWindowFlags
+import cn.enaium.lsp.edit.EditorFontSettings
+import cn.enaium.lsp.edit.installEditorFonts
 import kotlin.math.max
 
 /**
@@ -23,23 +24,21 @@ object SdlRendererApp {
     /**
      * Runs the app until the window is closed or [frames] frames were
      * rendered. [init] runs once after the imgui context + font atlas are
-     * ready; [draw] runs every frame; [close] releases per-app resources
-     * before the imgui context is destroyed.
+     * ready, and receives the small face of [fontSettings] (null when none
+     * was configured); [draw] runs every frame; [close] releases per-app
+     * resources before the imgui context is destroyed.
      */
     fun run(
         title: String,
         frames: Int,
-        init: (extraFont: cn.enaium.imgui.ImFont?) -> Unit,
+        init: (smallFont: cn.enaium.imgui.ImFont?) -> Unit,
         draw: (frame: Int) -> Unit,
         close: () -> Unit,
-        // Extra font added to the atlas before it is built; handed to init
-        // so hosts can e.g. size inlay hints smaller than the main font.
-        // 0 disables the extra font.
-        extraFontSizePx: Float = 0f,
-        // TTF/OTF/TTC file merged into the main font with mergeMode=true:
-        // glyphs the main font lacks (CJK, symbols, ...) render from this
-        // fallback automatically. Null disables the fallback.
-        fallbackFontPath: String? = null,
+        // The editor's faces (main + fallback merged into it + optional
+        // smaller variant), installed into the atlas before it is built. The
+        // smaller face is handed to init so hosts can size inlay hints below
+        // the body text.
+        fontSettings: EditorFontSettings = EditorFontSettings(),
         // SDL_TextInput goes both to imgui's IO queue and to this callback.
         // Return true to consume the event (the widget already handled it).
         onTextInput: (String) -> Boolean = { false },
@@ -73,44 +72,14 @@ object SdlRendererApp {
 
                     val fonts = ImGui.getIO().fonts
                     val density = maxOf(imgui.framebufferScale.x, imgui.framebufferScale.y, 1f)
-                    fonts.addFontDefault(
-                        ImFontConfig(
-                            sizePixels = 13f * density,
-                            rasterizerDensity = density,
-                        ),
-                    )
-                    if (fallbackFontPath != null) {
-                        val fallback = fonts.addFontFromFileTTF(
-                            fallbackFontPath,
-                            ImFontConfig(
-                                sizePixels = 13f * density,
-                                mergeMode = true,
-                                rasterizerDensity = density,
-                            ),
-                        )
-                        if (fallback != null) {
-                            println("merged fallback font: $fallbackFontPath")
-                        } else {
-                            println("fallback font not loaded: $fallbackFontPath")
-                        }
-                    }
-                    val extraFont =
-                        if (extraFontSizePx > 0f) {
-                            fonts.addFontDefault(
-                                ImFontConfig(
-                                    sizePixels = extraFontSizePx * density,
-                                    rasterizerDensity = density,
-                                ),
-                            )
-                        } else {
-                            null
-                        }
+                    // Faces must join the atlas before it is built.
+                    val editorFonts = installEditorFonts(fontSettings, density)
                     check(fonts.build()) { "font atlas build failed" }
                     val texData = fonts.getTexDataAsRGBA32()
                     val fontTextureId = backend.uploadFontTexture(texData.pixels, texData.width, texData.height)
                     fonts.setTexID(fontTextureId)
 
-                    init(extraFont)
+                    init(editorFonts.small)
 
                     var running = true
                     var frameCount = 0

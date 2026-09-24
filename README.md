@@ -27,6 +27,12 @@ references). A `DiffView` renders side-by-side diffs, and
   selection auto-scrolls vertically and horizontally at the viewport edges.
 - Per-editor theme palettes (`palette`, 25 `PaletteIndex` slots), including
   the 46 JetBrains IntelliJ palettes in `JetBrainsThemes`.
+- Editor fonts (`EditorFontSettings` + `installEditorFonts`): a main face, a
+  fallback TTF merged into it so glyphs the main font lacks (CJK, symbols)
+  render instead of tofu, and an optional smaller face for inlay hints and
+  inline code chips — all scaled by the framebuffer density. Call it before
+  the atlas is built, then hand `EditorFonts.main` to `Editor.font` and
+  `EditorFonts.small` to `Editor.inlayHintFont` / `MarkdownCode.codeFont`.
 - Scroll-follow that never fights manual scrolling (keyboard/edits follow
   the cursor, wheel/scrollbar drags are left alone); opening a document
   never auto-scrolls.
@@ -96,8 +102,11 @@ references). A `DiffView` renders side-by-side diffs, and
   pointer (markdown, with fenced code blocks via `MarkdownCode`): it stays
   open while the pointer is on it and closes after a short grace period once
   the pointer leaves both the code and the window.
-- Completion popup (detail + description), signature-help popup with the
-  active parameter highlighted.
+- Completion popup (detail + description) whose rows carry an IntelliJ node
+  icon per LSP `CompletionItemKind` (`CompletionIcons`, from the
+  `xicons-imgui-intellij` set); kinds IntelliJ has no distinct icon for
+  render unadorned. Signature-help popup with the active parameter
+  highlighted.
 - Code actions (Alt+Enter): `requestCodeActions()` lists quick fixes and
   refactors in a caret-anchored, borderless, resizable popup
   (`renderCodeActionPopup()`, Up/Down + Enter, Esc or click-outside closes).
@@ -160,7 +169,10 @@ kotlin-language-server defaults to socket mode):
 ```
 
 Native targets read `IMGUI_KMP_FRAMES=N` (or `--frames N` on the JVM) to exit
-after N frames for headless CI. Every example with native targets (`editor`,
+after N frames for headless CI. The JVM mains of `examples:editor` and
+`examples:syntax` also take `--font <path>` for the main editor font (the
+built-in font when omitted); either way they merge a system CJK font found on
+the host as the fallback. Every example with native targets (`editor`,
 `diff`, `syntax`) links an executable per platform:
 
 ```bash

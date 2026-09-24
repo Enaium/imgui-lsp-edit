@@ -907,7 +907,20 @@ class LspEditor(
             // selectable wraps at the popup width, so the window auto-sizes
             // to the real content height.
             val text = completionItemText(item)
-            if (ImGui.selectable(text, selected, cn.enaium.imgui.ImGuiSelectableFlags.NONE, ImVec2(width - 16f, 0f))) {
+            // Completion-kind icon, drawn into the gutter the selectable
+            // leaves free by indenting its text.
+            val icon = CompletionIcons.iconFor(item.kind)
+            val gutter = if (icon != null) CompletionIcons.gutter() else 0f
+            val rowStart = ImGui.getCursorScreenPos()
+            ImGui.indent(gutter)
+            val clicked = ImGui.selectable(
+                text, selected,
+                cn.enaium.imgui.ImGuiSelectableFlags.NONE,
+                ImVec2(width - 16f - gutter, 0f),
+            )
+            ImGui.unindent(gutter)
+            icon?.let { CompletionIcons.drawCentered(it, rowStart) }
+            if (clicked) {
                 val insert = item.insertText ?: item.label
                 insertCompletion(insert)
                 closeCompletion()

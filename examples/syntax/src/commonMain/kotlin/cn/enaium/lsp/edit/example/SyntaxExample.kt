@@ -5,6 +5,7 @@ import cn.enaium.imgui.ImGuiCond
 import cn.enaium.imgui.ImGuiWindowFlags
 import cn.enaium.imgui.ImVec2
 import cn.enaium.lsp.edit.Editor
+import cn.enaium.lsp.edit.EditorFontSettings
 import cn.enaium.lsp.edit.JetBrainsThemes
 import cn.enaium.lsp.edit.syntax.treesitter.TreeSitterHighlighter
 
@@ -18,12 +19,21 @@ import cn.enaium.lsp.edit.syntax.treesitter.TreeSitterHighlighter
  * pass `--frames N` / `IMGUI_KMP_FRAMES=N` to exit after N frames (headless
  * CI runs).
  */
-fun runSyntaxExample(frames: Int = Int.MAX_VALUE, fallbackFontPath: String? = null) {
+fun runSyntaxExample(
+    frames: Int = Int.MAX_VALUE,
+    mainFontPath: String? = null,
+    fallbackFontPath: String? = null,
+) {
     var app: SyntaxExampleApp? = null
     SdlRendererApp.run(
         title = "lsp-edit tree-sitter syntax example",
         frames = frames,
-        fallbackFontPath = fallbackFontPath,
+        // Main face (built-in when null) with a fallback merged in for the
+        // glyphs it lacks, e.g. a CJK font.
+        fontSettings = EditorFontSettings(
+            mainFontPath = mainFontPath,
+            fallbackFontPath = fallbackFontPath,
+        ),
         init = { _ -> app = SyntaxExampleApp() },
         draw = { frame -> app?.draw(frame) },
         close = { app?.close() },

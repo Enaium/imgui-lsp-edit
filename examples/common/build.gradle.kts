@@ -21,6 +21,8 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.imgui.kmp)
             implementation(libs.sdl.kmp)
+            // Only for the editor font settings the bootstrap installs.
+            api(project(":lsp-edit"))
         }
     }
 }

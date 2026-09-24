@@ -2,6 +2,7 @@ package cn.enaium.lsp.edit
 
 import cn.enaium.imgui.ImFontConfig
 import cn.enaium.imgui.ImGui
+import cn.enaium.imgui.ImTextureID
 import cn.enaium.imgui.ImVec2
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -22,7 +23,7 @@ class NoSpuriousScrollTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
 
             // Enough lines to roughly fill a 650px editor but not overflow.
             val lines = (0 until 40).joinToString("\n") { "fun f$it() = $it" }

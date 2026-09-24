@@ -218,8 +218,115 @@ object MarkdownCode {
     // ==================== code block rendering ====================
 
     /**
+     * One visual line of a code block: the slice `[from, to)` of logical
+     * line [line]. Wrapping splits a logical line into several of these.
+     */
+    internal class CodeRow(val line: Int, val from: Int, val to: Int)
+
+    /**
+     * Appends [line]'s visual rows: split at spaces so no row exceeds
+     * [width], falling back to a mid-word split when a single word does not
+     * fit. The space a row breaks at is consumed by the break, not carried to
+     * the next row; leading indentation of the logical line is preserved.
+     * Every row holds at least one character, so this always terminates.
+     */
+    internal fun wrapLine(
+        out: MutableList<CodeRow>,
+        index: Int,
+        line: String,
+        width: Float,
+        charWidth: (Char) -> Float,
+    ) {
+        if (line.isEmpty()) {
+            out.add(CodeRow(index, 0, 0))
+            return
+        }
+        var start = 0
+        while (start < line.length) {
+            // Longest prefix that fits; the first character always fits (a
+            // glyph wider than the row cannot be split any further).
+            var w = 0f
+            var end = start
+            while (end < line.length) {
+                val cw = charWidth(line[end])
+                if (end > start && w + cw > width) break
+                w += cw
+                end++
+            }
+            if (end >= line.length) {
+                out.add(CodeRow(index, start, line.length))
+                return
+            }
+            // Break at the last space that fits, but never inside the row's
+            // leading run of spaces (breaking there would split indentation
+            // onto a row of its own). Rows that are nothing but spaces keep
+            // their whole span.
+            var firstText = start
+            while (firstText < end && line[firstText] == ' ') firstText++
+            var cut = end
+            if (firstText < end) {
+                for (i in end - 1 downTo firstText + 1) {
+                    if (line[i] == ' ') {
+                        cut = i
+                        break
+                    }
+                }
+            }
+            out.add(CodeRow(index, start, cut))
+            // The break consumes the space run it landed on, so continuation
+            // rows never start with the separator. The first row is untouched,
+            // keeping the logical line's indentation.
+            start = cut
+            while (start < line.length && line[start] == ' ') start++
+        }
+    }
+
+    /**
+     * Draws the `[from, to)` slice of [line] at ([x], [y]), coloring it with
+     * [spans] (clipped to the slice) and [textColor] for the gaps.
+     */
+    private fun drawCodeRow(
+        drawList: cn.enaium.imgui.ImDrawList,
+        x: Float,
+        y: Float,
+        line: String,
+        from: Int,
+        to: Int,
+        spans: List<TokenSpan>,
+        textColor: Int,
+        palette: Array<Color>,
+    ) {
+        if (from >= to) return
+        var cx = x
+        var pos = from
+        for (span in spans) {
+            val s = span.start.coerceAtLeast(from)
+            val e = span.end.coerceAtMost(to)
+            if (e <= s) continue
+            if (s > pos) {
+                val gap = line.substring(pos, s)
+                drawList.DrawText(ImVec2(cx, y), gap, textColor)
+                cx += ImGui.calcTextSize(gap).x
+            }
+            val chunk = line.substring(s, e)
+            drawList.DrawText(
+                ImVec2(cx, y),
+                chunk,
+                palette[span.palette.coerceIn(0, PaletteIndex.COUNT - 1)].toImGuiColor(),
+            )
+            cx += ImGui.calcTextSize(chunk).x
+            pos = e
+        }
+        if (pos < to) {
+            drawList.DrawText(ImVec2(cx, y), line.substring(pos, to), textColor)
+        }
+    }
+
+    /**
      * Draws a fenced code block read-only: a dim background, syntax-colored
-     * text via [SyntaxHighlighter], no line numbers and no editing.
+     * text via [SyntaxHighlighter], no line numbers and no editing. Lines
+     * wider than the block wrap (at spaces, mid-word as a last resort) so the
+     * block never overflows the window that hosts it.
      */
     private fun renderCodeBlock(block: FencedBlock, fallback: Language?, palette: Array<Color>) {
         val lang = languageFor(block.info, fallback)
@@ -227,16 +334,27 @@ object MarkdownCode {
         val lineHeight = ImGui.getTextLineHeight()
         val padding = 8f
 
-        // Measure the widest line for the background width.
-        var maxWidth = 0f
+        // Width: shrink to the widest logical line, capped at the window. The
+        // cap is what forces wrapping — the natural width stays the target for
+        // short blocks so they keep their compact look.
+        var natural = 0f
         for (line in lines) {
             val w = ImGui.calcTextSize(line).x
-            if (w > maxWidth) maxWidth = w
+            if (w > natural) natural = w
         }
         val avail = ImGui.getContentRegionAvail().x
-        val blockWidth = (maxWidth + padding * 2f).coerceAtMost(avail)
-        val blockHeight = lineHeight * lines.size + padding * 2f
+        val blockWidth = (natural + padding * 2f).coerceAtMost(avail)
+        val wrapWidth = (blockWidth - padding * 2f).coerceAtLeast(lineHeight)
 
+        val charWidths = HashMap<Char, Float>()
+        val rows = ArrayList<CodeRow>(lines.size)
+        for ((index, line) in lines.withIndex()) {
+            wrapLine(rows, index, line, wrapWidth) { c ->
+                charWidths.getOrPut(c) { ImGui.calcTextSize(c.toString()).x }
+            }
+        }
+
+        val blockHeight = lineHeight * rows.size + padding * 2f
         val cursor = ImGui.getCursorScreenPos()
         val drawList = ImGui.getWindowDrawList()
 
@@ -260,50 +378,33 @@ object MarkdownCode {
         val cur = ImGui.getCursorPos()
         ImGui.setCursorPos(ImVec2(cur.x, cur.y + blockHeight))
 
-        // Draw each line with syntax colors.
-        var state = TokenState.NONE
+        // Walk the visual rows in order, tokenizing each logical line once
+        // (the tokenizer is stateful across lines, so it cannot be restarted
+        // per row).
         val textColor = palette[PaletteIndex.TEXT].toImGuiColor()
-        for ((row, line) in lines.withIndex()) {
-            val y = cursor.y + padding + row * lineHeight
-            if (lang != null) {
+        var state = TokenState.NONE
+        var row = 0
+        for ((index, line) in lines.withIndex()) {
+            val spans: List<TokenSpan> = if (lang != null) {
                 val result = SyntaxHighlighter.tokenize(lang, line, state)
                 state = result.carryState
-                var x = cursor.x + padding
-                var pos = 0
-                for (span in result.spans) {
-                    if (span.start > pos) {
-                        drawList.DrawText(
-                            ImVec2(x, y),
-                            line.substring(pos, span.start.coerceAtMost(line.length)),
-                            textColor,
-                        )
-                        x += ImGui.calcTextSize(line.substring(pos, span.start.coerceAtMost(line.length))).x
-                    }
-                    val end = span.end.coerceAtMost(line.length)
-                    if (end > span.start) {
-                        val chunk = line.substring(span.start, end)
-                        drawList.DrawText(
-                            ImVec2(x, y),
-                            chunk,
-                            palette[span.palette.coerceIn(0, PaletteIndex.COUNT - 1)].toImGuiColor(),
-                        )
-                        x += ImGui.calcTextSize(chunk).x
-                    }
-                    pos = end
-                }
-                if (pos < line.length) {
-                    drawList.DrawText(
-                        ImVec2(x, y),
-                        line.substring(pos),
-                        textColor,
-                    )
-                }
+                result.spans
             } else {
-                drawList.DrawText(
-                    ImVec2(cursor.x + padding, y),
+                emptyList()
+            }
+            while (row < rows.size && rows[row].line == index) {
+                drawCodeRow(
+                    drawList,
+                    cursor.x + padding,
+                    cursor.y + padding + row * lineHeight,
                     line,
+                    rows[row].from,
+                    rows[row].to,
+                    spans,
                     textColor,
+                    palette,
                 )
+                row++
             }
         }
     }

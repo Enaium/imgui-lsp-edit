@@ -1,6 +1,7 @@
 package cn.enaium.lsp.edit
 
 import cn.enaium.imgui.ImGui
+import cn.enaium.imgui.ImTextureID
 import cn.enaium.imgui.ImVec2
 import kotlin.math.abs
 import kotlin.test.Test
@@ -24,7 +25,7 @@ class AdvanceProbe {
             val fonts = io.fonts
             fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = sizePixels, rasterizerDensity = density))
             check(fonts.build()) { "font build failed" }
-            fonts.setTexID(0)
+            fonts.setTexID(ImTextureID(0uL))
 
             ImGui.newFrame()
             val text = "h" + "e".repeat(49) // 50 chars
@@ -114,7 +115,7 @@ class InlayHintCursorTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
             // imgui-kmp >= 1.0.8 requires an active frame before any
             // CalcTextSize; otherwise the font's glyph data is not ready
             // and the native call segfaults.
@@ -174,7 +175,7 @@ class MarkdownHoverTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
             // imgui-kmp >= 1.0.8 requires an active frame before any
             // CalcTextSize; otherwise the font's glyph data is not ready
             // and the native call segfaults.
@@ -228,7 +229,7 @@ class MarkdownWrapTest {
             io.deltaTime = 1f / 60f
             io.fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = 13f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
             io.addMousePosEvent(640f, 400f)
             ImGui.newFrame()
 
@@ -290,7 +291,7 @@ class InlayHintFontTest {
             val mainFont = io.fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = 13f))
             val smallFont = io.fonts.addFontDefault(cn.enaium.imgui.ImFontConfig(sizePixels = 10f))
             check(io.fonts.build()) { "font build failed" }
-            io.fonts.setTexID(0)
+            io.fonts.setTexID(ImTextureID(0uL))
             ImGui.newFrame()
 
             fun width(font: cn.enaium.imgui.ImFont, label: String): Float {
