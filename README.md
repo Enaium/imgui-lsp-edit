@@ -15,6 +15,71 @@ references). A `DiffView` renders side-by-side diffs, and
 protocol end): the handshake, every breakpoint kind, stepping (reverse too),
 stack/scopes/variables with editing, exception details, the debug console.
 
+## Dependency
+
+Published on Maven Central, so `mavenCentral()` is the only repository you
+need:
+
+```kotlin
+// build.gradle.kts
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation("cn.enaium.imgui:lsp-edit:1.0.2")
+            // lsp-edit's signatures are written in these types, and the
+            // published POM keeps them at runtime scope — declare them too,
+            // or calls like editor.render("##e", ImVec2(-1f, -1f)) do not
+            // compile.
+            implementation("cn.enaium.imgui:imgui-kmp:1.0.16")   // ImVec2, ImGui, Icon…
+            implementation("cn.enaium:lsp-kmp:1.0.1")            // LspClient, DapSession…
+        }
+    }
+}
+```
+
+Through a version catalog:
+
+```toml
+# gradle/libs.versions.toml
+[versions]
+lsp-edit = "1.0.2"
+imgui-kmp = "1.0.16"
+lsp-kmp = "1.0.1"
+
+[libraries]
+lsp-edit = { module = "cn.enaium.imgui:lsp-edit", version.ref = "lsp-edit" }
+imgui-kmp = { module = "cn.enaium.imgui:imgui-kmp", version.ref = "imgui-kmp" }
+lsp-kmp = { module = "cn.enaium:lsp-kmp", version.ref = "lsp-kmp" }
+```
+
+The rest arrives with it (the published POM pins these; all are runtime
+scope, so they are on the classpath at run time):
+
+| Dependency | Version | What it brings |
+| --- | --- | --- |
+| `imgui-kmp` | 1.0.16 | the ImGui bindings the widget renders through |
+| `lsp-kmp` | 1.0.1 | protocol models, transports, the DAP client |
+| `ktreesitter` | 0.25.1 | the tree-sitter core (grammars are yours to add) |
+| `xicons-imgui-core` / `xicons-imgui-intellij` | 1.0.3 | the icon set (completion kinds, breakpoints) |
+| `kotlinx-coroutines-core` / `kotlinx-serialization-json` | 1.11.0 | |
+
+The POM also excludes `xicons-imgui-intellij-g`, which its own metadata
+references but which was never published — consumers do not have to repeat
+that exclusion.
+
+Targets: JVM, Android, macOS (x64, arm64), iOS (x64, arm64, simulator), tvOS
+(arm64, simulator), watchOS (arm64, simulator, device), Linux (x64, arm64) and
+Windows (mingwX64).
+
+Two constraints worth knowing before you pick targets:
+
+- `TreeSitterHighlighter` and `HighlightQueries` exist only where `ktreesitter`
+  is published — JVM, Android, macOS, Linux, Windows and iOS
+  arm64/simulator. `iosX64`, tvOS and watchOS get the rest of the library
+  without them.
+- Android consumers need `compileSdk = 37`: imgui-kmp's AAR is compiled
+  against API 37.
+
 ## Features
 
 ### `Editor` widget
@@ -157,7 +222,7 @@ stack/scopes/variables with editing, exception details, the debug console.
 ./gradlew :examples:syntax:jvmTest    # 34-language tree-sitter highlight tests
 ```
 
-Targets: JVM, macOS, iOS, tvOS, watchOS, Linux, Windows (mingw), Android.
+Targets are listed under [Dependency](#dependency).
 
 ## Examples
 
