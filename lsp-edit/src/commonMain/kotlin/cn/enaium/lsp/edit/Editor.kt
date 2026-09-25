@@ -50,6 +50,16 @@ class Editor(
     private var charWidth = 1f
     private var lineHeight = 1f
     private var gutterWidth = 4f
+
+    /**
+     * Gap between the fold marker's strip and the first character of the code.
+     * Font-relative like every other gutter metric; a fixed two pixels left
+     * the toggle almost touching the text.
+     */
+    private fun foldMarkerGap(): Float = charWidth * 0.6f
+
+    /** Width of the breakpoint strip at the gutter's left edge. */
+    private var breakpointColumnWidth = 0f
     private var textStartX = 0f
     private var textStartY = 0f
     private var contentWidth = 0f
@@ -156,7 +166,11 @@ class Editor(
     var onHover: ((DocPos) -> Unit)? = null
     var onHoverEnd: (() -> Unit)? = null
 
-    /** Invoked when F9 toggles a breakpoint (with the 1-based line set). */
+    /**
+     * Invoked when a breakpoint is toggled — F9 at the cursor, or a click on
+     * the line-number strip — with the 1-based line set. The host forwards it
+     * to whatever owns the breakpoints (a debug session, an adapter).
+     */
     var onBreakpointsChange: ((Set<Int>) -> Unit)? = null
 
     /** When set, [spansOf] delegates to this provider (e.g. LSP tokens). */
@@ -888,26 +902,44 @@ class Editor(
     }
 
     // ---- debug state ----
-    /** Lines with breakpoints (1-based adapter lines). */
-    private var breakpoints: Set<Int> = emptySet()
+    /** Breakpoints by 1-based line, with the state the gutter draws. */
+    private var breakpoints: Map<Int, EditorBreakpoint> = emptyMap()
 
     /** The line currently stopped on (1-based adapter line), or null. */
     private var executionLine: Int? = null
 
     /** The current breakpoint lines (1-based). */
-    fun getBreakpointLines(): Set<Int> = breakpoints
+    fun getBreakpointLines(): Set<Int> = breakpoints.keys
 
-    /** Replaces the breakpoint set (1-based lines) shown in the gutter. */
+    /**
+     * Replaces the breakpoint set (1-based lines) with plain enabled markers,
+     * for hosts that have no adapter state to show.
+     */
     fun setBreakpoints(lines: Set<Int>) {
-        breakpoints = lines
+        breakpoints = lines.associateWith { EditorBreakpoint(line = it) }
     }
+
+    /**
+     * Replaces the markers, states included: [EditorBreakpoint.verified] from
+     * a debug adapter, [EditorBreakpoint.conditional] for conditioned ones,
+     * and so on. Each state gets its own icon.
+     */
+    fun setBreakpointMarkers(markers: List<EditorBreakpoint>) {
+        breakpoints = markers.associateBy { it.line }
+    }
+
+    /** The markers with their states, ordered by line. */
+    fun getBreakpointMarkers(): List<EditorBreakpoint> = breakpoints.values.sortedBy { it.line }
+
+    /** The marker at [line] (0-based), or null. */
+    fun breakpointAt(line: Int): EditorBreakpoint? = breakpoints[line + 1]
 
     /** True when [line] (0-based) has a breakpoint. */
     fun hasBreakpoint(line: Int): Boolean = (line + 1) in breakpoints
 
     /** Toggles the breakpoint at [line] (0-based); returns the new state. */
     fun toggleBreakpoint(line: Int): Boolean {
-        val newSet = breakpoints.toMutableSet()
+        val newSet = breakpoints.keys.toMutableSet()
         val b = line + 1
         val added = if (b in newSet) {
             newSet.remove(b)
@@ -916,7 +948,7 @@ class Editor(
             newSet.add(b)
             true
         }
-        breakpoints = newSet
+        breakpoints = newSet.associateWith { EditorBreakpoint(line = it) }
         return added
     }
 
@@ -1344,10 +1376,17 @@ class Editor(
             lastFont = font
             lineWidthCache.clear()
         }
+        // The gutter is a breakpoint column, then the line numbers, then the
+        // fold arrow. The breakpoint column is its own strip so a marker never
+        // lands on a digit, and it is as wide as a row is tall (the icons are
+        // square and scale with the font).
+        breakpointColumnWidth = if (showLineNumbers) lineHeight else 0f
         gutterWidth = if (showLineNumbers) {
-            // Reserve room for the fold arrow at the gutter's right edge so
-            // a wide line number never overlaps it.
-            8f + charWidth * max(3, buffer.lineCount().toString().length) + charWidth + 2f
+            breakpointColumnWidth +
+                // padding + numbers + the fold arrow's strip at the right edge
+                // + the gap between that strip and the code
+                8f + charWidth * max(3, buffer.lineCount().toString().length) +
+                charWidth + foldMarkerGap()
         } else 4f
         textStartX = viewOriginX + gutterWidth
         textStartY = viewOriginY
@@ -1594,20 +1633,31 @@ class Editor(
         val line = visibleDocLines.getOrElse(row) { buffer.lineCount() - 1 }
         val col = columnAtX(line, x)
         val pos = DocPos(line, col)
-        val overGutter = mouse.x < textStartX
+        // The gutter does not scroll horizontally while the text does, so the
+        // gutter's screen edge is the text start minus the horizontal scroll
+        // (textStartX itself includes it).
+        val gutterEdgeX = textStartX - scrollX
+        val overGutter = mouse.x < gutterEdgeX
 
         val clicked = ImGui.isItemClicked(0) && !overGutter
         val dragging = captureActive && ImGui.isMouseDragging(0) && !overGutter
         val doubleClicked = ImGui.isMouseDoubleClicked(0) && captureHovered && !overGutter
 
-        // Clicking the gutter fold marker toggles the fold for that line.
+        // Gutter clicks: the strip at the gutter's right edge belongs to the
+        // fold marker, the breakpoint column and the line numbers to the
+        // breakpoint — how IDEs split those targets. The host hears about
+        // breakpoint changes through [onBreakpointsChange], e.g. to tell a
+        // debug adapter.
         if (overGutter && ImGui.isItemClicked(0)) {
-            val fold = foldAt(line)
-            if (fold != null) {
+            val overFoldMarker = mouse.x >= gutterEdgeX - charWidth - foldMarkerGap()
+            if (overFoldMarker && foldAt(line) != null) {
                 toggleFold(line)
-                endHover()
-                return
+            } else {
+                toggleBreakpoint(line)
+                onBreakpointsChange?.invoke(getBreakpointLines())
             }
+            endHover()
+            return
         }
 
         // Clicking the ellipsis of a collapsed line unfolds it; the click
@@ -2187,17 +2237,25 @@ class Editor(
                     palette[PaletteIndex.LINE_NUMBER_SELECTED]
                 } else marker?.lineNumberColor ?: palette[PaletteIndex.LINE_NUMBER]
                 drawList.DrawText(
-                    ImVec2(origin.x + 4f, numY),
+                    ImVec2(origin.x + breakpointColumnWidth + 4f, numY),
                     "${line + 1}",
                     color.toImGuiColor(),
                 )
-                // Breakpoint dot at the left edge of the gutter.
-                if (hasBreakpoint(line)) {
-                    drawList.DrawCircleFilled(
-                        ImVec2(origin.x + 3f, numY + lineHeight / 2f),
-                        charWidth * 0.38f,
-                        palette[PaletteIndex.BREAKPOINT].toImGuiColor(),
-                    )
+                // Breakpoint marker in its own column: an IntelliJ icon per
+                // state (plain / verified / rejected / disabled / logpoint),
+                // with the condition badge overlaid when it has one.
+                breakpoints[line + 1]?.let { breakpoint ->
+                    val size = lineHeight
+                    val bx = origin.x + (breakpointColumnWidth - size) / 2f
+                    val by = numY + (lineHeight - size) / 2f
+                    BreakpointIcons.iconFor(breakpoint).draw(ImVec2(bx, by), size)
+                    if (breakpoint.conditional) {
+                        val badge = size * 0.62f
+                        BreakpointIcons.conditionalBadge.draw(
+                            ImVec2(bx + size - badge, by + size - badge),
+                            badge,
+                        )
+                    }
                 }
                 // Fold marker at the right edge of the gutter: a boxed "-"
                 // when expanded (click to fold) and "+" when collapsed (click
@@ -2205,7 +2263,7 @@ class Editor(
                 // visible at a glance. ASCII glyphs render in any mono font.
                 if (foldAt(line) != null) {
                     val folded = line in collapsedStarts
-                    val markerX = origin.x + gutterWidth - charWidth - 2f
+                    val markerX = origin.x + gutterWidth - charWidth - foldMarkerGap()
                     val color = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
                     // Square frame centred on the glyph (not a stretched
                     // rectangle): side = line height minus a small margin.

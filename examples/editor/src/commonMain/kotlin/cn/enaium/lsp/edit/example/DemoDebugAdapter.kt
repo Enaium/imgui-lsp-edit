@@ -56,7 +56,7 @@ class DemoDebugAdapter : DebugAdapter {
         return null
     }
 
-    override fun disconnect(args: JsonElement?): JsonElement? {
+    override fun disconnect(args: DisconnectArguments?): JsonElement? {
         running = false
         return null
     }
@@ -67,22 +67,22 @@ class DemoDebugAdapter : DebugAdapter {
         return ContinueResponseBody(allThreadsContinued = true)
     }
 
-    override fun next(args: JsonElement?): JsonElement? {
+    override fun next(args: NextArguments): JsonElement? {
         step()
         return null
     }
 
-    override fun stepIn(args: JsonElement?): JsonElement? {
+    override fun stepIn(args: StepInArguments): JsonElement? {
         step()
         return null
     }
 
-    override fun stepOut(args: JsonElement?): JsonElement? {
+    override fun stepOut(args: StepOutArguments): JsonElement? {
         step()
         return null
     }
 
-    override fun pause(args: JsonElement?): JsonElement? = null
+    override fun pause(args: PauseArguments): JsonElement? = null
 
     override fun setBreakpoints(args: SetBreakpointsArguments): SetBreakpointsResponseBody {
         breakpoints.clear()
@@ -138,7 +138,7 @@ class DemoDebugAdapter : DebugAdapter {
     override fun evaluate(args: EvaluateArguments): EvaluateResponseBody =
         EvaluateResponseBody(result = "undefined", type = "String")
 
-    override fun terminate(args: JsonElement?): JsonElement? {
+    override fun terminate(args: TerminateArguments?): JsonElement? {
         running = false
         return null
     }

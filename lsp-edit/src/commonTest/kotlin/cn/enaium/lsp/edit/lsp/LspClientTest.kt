@@ -5,7 +5,30 @@ import cn.enaium.lsp.LanguageServerLauncher
 import cn.enaium.lsp.TextDocumentService
 import cn.enaium.lsp.dap.DebugAdapter
 import cn.enaium.lsp.dap.DebugAdapterLauncher
-import cn.enaium.lsp.dap.model.*
+// The DAP models are imported one by one: the wildcard would clash with
+// cn.enaium.lsp.model on `CompletionItem` (both protocols have one).
+import cn.enaium.lsp.dap.model.Breakpoint
+import cn.enaium.lsp.dap.model.Capabilities
+import cn.enaium.lsp.dap.model.ContinueArguments
+import cn.enaium.lsp.dap.model.ContinueResponseBody
+import cn.enaium.lsp.dap.model.EvaluateArguments
+import cn.enaium.lsp.dap.model.EvaluateResponseBody
+import cn.enaium.lsp.dap.model.InitializeRequestArguments
+import cn.enaium.lsp.dap.model.Scope
+import cn.enaium.lsp.dap.model.ScopesArguments
+import cn.enaium.lsp.dap.model.ScopesResponseBody
+import cn.enaium.lsp.dap.model.SetBreakpointsArguments
+import cn.enaium.lsp.dap.model.SetBreakpointsResponseBody
+import cn.enaium.lsp.dap.model.Source
+import cn.enaium.lsp.dap.model.SourceBreakpoint
+import cn.enaium.lsp.dap.model.StackFrame
+import cn.enaium.lsp.dap.model.StackTraceArguments
+import cn.enaium.lsp.dap.model.StackTraceResponseBody
+import cn.enaium.lsp.dap.model.Thread
+import cn.enaium.lsp.dap.model.ThreadsResponseBody
+import cn.enaium.lsp.dap.model.Variable
+import cn.enaium.lsp.dap.model.VariablesArguments
+import cn.enaium.lsp.dap.model.VariablesResponseBody
 import cn.enaium.lsp.model.*
 import kotlinx.coroutines.*
 import kotlin.test.Test
@@ -283,8 +306,9 @@ class LspClientTest {
 }
 
 /**
- * End-to-end DAP tests: a real [cn.enaium.lsp.edit.dap.DapClient] speaking
- * to a [cn.enaium.lsp.dap.DebugAdapterLauncher] over the in-memory pair.
+ * End-to-end DAP tests: a real [cn.enaium.lsp.dap.DebugClientLauncher]
+ * speaking to a [cn.enaium.lsp.dap.DebugAdapterLauncher] over the in-memory
+ * pair.
  */
 class DapClientTest {
 
@@ -338,13 +362,19 @@ class DapClientTest {
         val adapter = ScriptedAdapter()
         runAdapter(pair, adapter)
 
-        val client = cn.enaium.lsp.edit.dap.DapClient(pair.a)
-        client.startListening()
+        val client = cn.enaium.lsp.dap.DebugClientLauncher(pair.a)
+        val clientScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default,
+        )
+        clientScope.launch { client.listen() }
 
-        val caps = client.initialize(adapterID = "lsp-edit-test")
+        val caps = client.initialize(InitializeRequestArguments(adapterID = "lsp-edit-test"))
         assertTrue(caps.supportsConfigurationDoneRequest)
 
-        client.setBreakpoints(Source(name = "demo.kt", path = "file:///demo.kt"), listOf(8, 10))
+        client.setBreakpoints(
+            Source(name = "demo.kt", path = "file:///demo.kt"),
+            listOf(SourceBreakpoint(line = 8), SourceBreakpoint(line = 10)),
+        )
         assertEquals(setOf(8, 10), adapter.breakpointLines)
 
         client.continue_(threadId = 1)
@@ -359,9 +389,10 @@ class DapClientTest {
         assertEquals(listOf("x", "y"), vars.variables.map { it.name })
 
         val eval = client.evaluate("x + y", frameId = 1)
-        assertEquals("42", eval?.result)
+        assertEquals("42", eval.result)
 
         client.disconnect()
+        clientScope.cancel()
         pair.close()
     }
 }

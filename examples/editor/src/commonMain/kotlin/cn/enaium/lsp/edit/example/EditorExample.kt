@@ -11,7 +11,8 @@ import cn.enaium.lsp.edit.Editor
 import cn.enaium.lsp.edit.EditorFontSettings
 import cn.enaium.lsp.edit.Language
 import cn.enaium.lsp.edit.lsp.InMemoryTransportPair
-import cn.enaium.lsp.edit.dap.DapClient
+import cn.enaium.lsp.dap.DebugClientLauncher
+import cn.enaium.lsp.dap.model.SourceBreakpoint
 import cn.enaium.lsp.edit.dap.DapSession
 import cn.enaium.lsp.edit.lsp.LspClient
 import cn.enaium.lsp.edit.diff.DiffView
@@ -94,7 +95,7 @@ private class LspEditorApp {
     private val showMinimap = BooleanArray(1) { true }
 
     private val debugPair = InMemoryTransportPair()
-    private val debugClient = DapClient(debugPair.a)
+    private val debugClient = DebugClientLauncher(debugPair.a)
     val debugAdapter = DemoDebugAdapter().apply { sourcePath = "file:///demo.kt" }
     val debugSession = DapSession(
         editor = editor,
@@ -137,7 +138,11 @@ private class LspEditorApp {
             status = "code lens: ${lens.title}${lens.command?.let { " ($it)" } ?: ""}"
             if (lens.command == "demo.run" && !debugSession.active) {
                 GlobalScope.launch(Dispatchers.Default) {
-                    debugSession.start(breakpoints = editor.getBreakpointLines())
+                    debugSession.start(
+                        breakpoints = editor.getBreakpointLines()
+                            .sorted()
+                            .map { SourceBreakpoint(line = it) },
+                    )
                 }
             }
         }
@@ -149,7 +154,8 @@ private class LspEditorApp {
                 debugSession.applyBreakpoints(lines)
             }
         }
-        debugSession.wireEvents()
+        // Events are wired by the session itself when it starts; the host
+        // only registers what it wants to observe.
         debugSession.onStopped { pos ->
             if (pos != null) editor.setCursor(pos)
         }
@@ -241,7 +247,11 @@ private class LspEditorApp {
         ImGui.separatorText("Debug (DAP)")
         if (ImGui.button("Start") && !debugSession.active) {
             GlobalScope.launch(Dispatchers.Default) {
-                debugSession.start(breakpoints = editor.getBreakpointLines())
+                debugSession.start(
+                        breakpoints = editor.getBreakpointLines()
+                            .sorted()
+                            .map { SourceBreakpoint(line = it) },
+                    )
             }
         }
         ImGui.sameLine()
@@ -338,8 +348,9 @@ private class LspEditorApp {
 
     fun close() {
         GlobalScope.launch(Dispatchers.Default) { debugSession.stop() }
+        // The session's scope owns the client's listen loop, so closing the
+        // session is what stops it (the launcher itself is stateless).
         debugSession.close()
-        debugClient.close()
         debugPair.close()
         lspEditor.close()
         pair.close()

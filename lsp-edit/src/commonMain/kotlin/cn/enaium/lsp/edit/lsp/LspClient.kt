@@ -362,21 +362,14 @@ class LspClient(
                         element,
                     )
                 } else {
-                    // Flat mode: convert SymbolInformation list into a shallow
-                    // DocumentSymbol list so callers see one tree shape.
+                    // Flat mode: a flat server lists every symbol as a sibling,
+                    // with the container only named. Nest it into the same tree
+                    // shape the hierarchical form already has.
                     val flat = LspJson.json.decodeFromJsonElement(
                         ListSerializer(SymbolInformation.serializer()),
                         element,
                     )
-                    flat.map {
-                        DocumentSymbol(
-                            name = it.name,
-                            kind = it.kind,
-                            range = it.location.range,
-                            selectionRange = it.location.range,
-                            detail = it.containerName,
-                        )
-                    }
+                    buildSymbolTree(flat)
                 }
             }
         } catch (e: CancellationException) {

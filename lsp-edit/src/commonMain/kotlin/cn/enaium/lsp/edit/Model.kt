@@ -124,6 +124,31 @@ data class EditorCodeLens(
     val command: String? = null,
 )
 
+/**
+ * A breakpoint marker in the editor's gutter.
+ *
+ * The states are the ones a debugger distinguishes, and each gets its own
+ * IntelliJ icon (see `BreakpointIcons`): a plain marker before any adapter has
+ * judged it, verified or rejected once one has, greyed when the user disabled
+ * it, and a badge when it carries a condition.
+ */
+data class EditorBreakpoint(
+    /** 1-based line, matching [Editor.setBreakpoints]. */
+    val line: Int,
+    /**
+     * The debug adapter's verdict: null before one has judged this breakpoint,
+     * true when it verified it, false when it rejected it (e.g. no executable
+     * code on that line).
+     */
+    val verified: Boolean? = null,
+    /** False when the user turned it off: still shown, not sent to an adapter. */
+    val enabled: Boolean = true,
+    /** True when the breakpoint carries a condition (drawn with a "?" badge). */
+    val conditional: Boolean = false,
+    /** True for a logpoint, which logs instead of suspending. */
+    val logpoint: Boolean = false,
+)
+
 /** Converts a packed [Color] into the 0xAABBGGRR int imgui draw calls expect. */
 fun Color.toImGuiColor(): Int {
     val a = (this ushr 24) and 0xFF

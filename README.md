@@ -11,7 +11,9 @@ window; an optional `LspEditor` layer binds it to an LSP server
 (`didOpen`/`didChange`, diagnostics, hover, completion, go-to-definition,
 semantic tokens, folding, inlay hints, code lenses, signature help, rename,
 references). A `DiffView` renders side-by-side diffs, and
-`DapClient`/`DapSession` speak the Debug Adapter Protocol.
+`DapSession` drives a debug adapter (lsp-kmp's `DebugClientLauncher` is the
+protocol end): the handshake, every breakpoint kind, stepping (reverse too),
+stack/scopes/variables with editing, exception details, the debug console.
 
 ## Features
 
@@ -27,6 +29,12 @@ references). A `DiffView` renders side-by-side diffs, and
   selection auto-scrolls vertically and horizontally at the viewport edges.
 - Per-editor theme palettes (`palette`, 25 `PaletteIndex` slots), including
   the 46 JetBrains IntelliJ palettes in `JetBrainsThemes`.
+- Breakpoints in the gutter: a dedicated column left of the line numbers
+  (markers never land on a digit), toggled by clicking it or F9, drawn with
+  the IntelliJ breakpoint icons — plain, verified, rejected, disabled and
+  logpoint states, plus a "?" badge for conditioned ones
+  (`setBreakpointMarkers` / `EditorBreakpoint`; `onBreakpointsChange` tells
+  the host).
 - Editor fonts (`EditorFontSettings` + `installEditorFonts`): a main face, a
   fallback TTF merged into it so glyphs the main font lacks (CJK, symbols)
   render instead of tofu, and an optional smaller face for inlay hints and
@@ -134,7 +142,7 @@ references). A `DiffView` renders side-by-side diffs, and
 
 | Module | Description |
 | --- | --- |
-| `lsp-edit` | The library: `Editor`, `LspEditor`, `LspClient`, `MarkdownCode`, `JetBrainsThemes`, `TreeSitterHighlighter`, `DiffView`, `DapClient`/`DapSession`, transports. |
+| `lsp-edit` | The library: `Editor`, `LspEditor`, `LspClient`, `MarkdownCode`, `JetBrainsThemes`, `TreeSitterHighlighter`, `DiffView`, `DapSession`, transports. |
 | `examples:common` | Shared example host (`SdlRendererApp`, sample servers). |
 | `examples:editor` | ImGui window hosting `LspEditor` against an in-process demo server (code lens, indent-guide toggle, debug panel). |
 | `examples:diff` | Side-by-side `DiffView` of two Kotlin samples. |
