@@ -25,7 +25,7 @@ need:
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("cn.enaium.imgui:lsp-edit:1.0.2")
+            implementation("cn.enaium.imgui:lsp-edit:1.0.3")
             // lsp-edit's signatures are written in these types, and the
             // published POM keeps them at runtime scope — declare them too,
             // or calls like editor.render("##e", ImVec2(-1f, -1f)) do not
@@ -42,7 +42,7 @@ Through a version catalog:
 ```toml
 # gradle/libs.versions.toml
 [versions]
-lsp-edit = "1.0.2"
+lsp-edit = "1.0.3"
 imgui-kmp = "1.0.16"
 lsp-kmp = "1.0.1"
 

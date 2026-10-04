@@ -218,7 +218,14 @@ class Editor(
     private var foldRanges: List<EditorFoldRange> = emptyList()
 
     /** Start lines of ranges currently collapsed. */
-    private val collapsedStarts = HashSet<Int>()
+    /**
+     * Fold ids whose range is collapsed: [EditorFoldRange.key] when the host
+     * supplies one, the start line otherwise (see [foldId]).
+     */
+    private val collapsedFolds = HashSet<Long>()
+
+    /** Line-space view of [collapsedFolds], rebuilt whenever ranges or state change. */
+    private var collapsedLines = HashSet<Int>()
 
     /** Line whose collapsed-fold preview is showing (-1 = none). */
     private var foldPreviewLine = -1
@@ -230,15 +237,17 @@ class Editor(
     private var markerTipMax: ImVec2? = null
     private var markerTipHideDeadline = 0.0
 
-    /** Whether the ellipsis was hovered this frame (set by drawText). */
+    /** Whether a collapsed fold's row (or its ellipsis) was hovered this frame. */
     private var foldPreviewHover = false
-
-    /** Last frame's preview rect, used to keep it open while hovered. */
-    private var foldPreviewMin: ImVec2? = null
-    private var foldPreviewMax: ImVec2? = null
 
     /** Max lines rendered in the fold-preview tooltip. */
     private val FOLD_PREVIEW_MAX_LINES = 40
+
+    /** Narrowest fold-preview tooltip: a one-word payload still needs a box. */
+    private val FOLD_PREVIEW_MIN_WIDTH = 240f
+
+    /** Text inset of the fold preview (imgui's default window padding, per side). */
+    private val FOLD_PREVIEW_PADDING = 8f
 
     /**
      * Visible-line mapping, rebuilt whenever folds or the document change:
@@ -260,16 +269,28 @@ class Editor(
      */
     fun setFoldRanges(ranges: List<EditorFoldRange>) {
         foldRanges = ranges.sortedBy { it.startLine }
-        val starts = foldRanges.mapTo(HashSet()) { it.startLine }
-        collapsedStarts.removeAll { it !in starts }
+        val ids = foldRanges.mapTo(HashSet()) { foldId(it) }
+        collapsedFolds.retainAll(ids)
+        rebuildCollapsedLines()
         foldsDirty = true
+    }
+
+    /** The identity a fold's collapse state is kept against. */
+    private fun foldId(range: EditorFoldRange): Long = range.key ?: range.startLine.toLong()
+
+    /** Re-derives the O(1) line view after [collapsedFolds] or the ranges change. */
+    private fun rebuildCollapsedLines() {
+        collapsedLines = HashSet(collapsedFolds.size)
+        for (r in foldRanges) {
+            if (foldId(r) in collapsedFolds) collapsedLines.add(r.startLine)
+        }
     }
 
     /** The current fold ranges (see [setFoldRanges]). */
     fun getFoldRanges(): List<EditorFoldRange> = foldRanges
 
     /** True when [line] has a fold range and it is collapsed. */
-    fun isLineFolded(line: Int): Boolean = line in collapsedStarts
+    fun isLineFolded(line: Int): Boolean = line in collapsedLines
 
     /** True when [line] is currently visible (not hidden by a fold). */
     fun isLineVisible(line: Int): Boolean {
@@ -283,9 +304,11 @@ class Editor(
      */
     fun toggleFold(line: Int): Boolean {
         val range = foldAt(line) ?: containingFold(line) ?: return false
-        if (!collapsedStarts.add(range.startLine)) {
-            collapsedStarts.remove(range.startLine)
+        val id = foldId(range)
+        if (!collapsedFolds.add(id)) {
+            collapsedFolds.remove(id)
         }
+        rebuildCollapsedLines()
         foldsDirty = true
         return true
     }
@@ -294,11 +317,14 @@ class Editor(
     fun unfoldAround(line: Int) {
         var changed = false
         for (r in foldRanges) {
-            if (line in (r.startLine + 1)..r.endLine && collapsedStarts.remove(r.startLine)) {
+            if (line in (r.startLine + 1)..r.endLine && collapsedFolds.remove(foldId(r))) {
                 changed = true
             }
         }
-        if (changed) foldsDirty = true
+        if (changed) {
+            rebuildCollapsedLines()
+            foldsDirty = true
+        }
     }
 
     /** The fold range starting exactly at [line], or null. */
@@ -311,51 +337,66 @@ class Editor(
     }
 
     /**
-     * Collapsed-fold preview as a regular window (like the LSP hover popup):
-     * the pointer can move onto it — that keeps it open — and it can be
-     * resized with the mouse. Closing happens here, once the pointer is on
-     * neither the ellipsis nor the popup.
+     * Collapsed-fold preview, IntelliJ-style: it hangs off the pointer, is as
+     * big as the lines it shows — a three-line payload gets a three-line box —
+     * and is gone the moment the pointer leaves the row it belongs to. Only a
+     * payload too large for that grows into the space below and right of the
+     * pointer, up to the screen edge (the window scrolls from there).
+     *
+     * It takes no input at all ([ImGuiWindowFlags.NO_INPUTS]): moving onto it
+     * must not keep it open, and it must not steal the hover that keeps it
+     * open in the first place — it is drawn right under the pointer, over the
+     * very row being hovered.
      */
     private fun renderFoldPreviewWindow() {
         val line = foldPreviewLine
         if (line < 0) return
         val range = foldAt(line)
-        val mouse = ImGui.getMousePos()
-        val onPopup = foldPreviewMin?.let { min ->
-            val max = foldPreviewMax ?: min
-            // Outset: ImGui's resize border sits just outside the window
-            // rect — without the padding a drag on the edge counted as
-            // "pointer left" and the window vanished mid-resize.
-            val pad = 10f
-            mouse.x >= min.x - pad && mouse.x <= max.x + pad &&
-                mouse.y >= min.y - pad && mouse.y <= max.y + pad
-        } ?: false
-        if (range == null || line !in collapsedStarts || (!foldPreviewHover && !onPopup)) {
+        if (range == null || line !in collapsedLines || !foldPreviewHover) {
             foldPreviewLine = -1
-            foldPreviewMin = null
-            foldPreviewMax = null
             return
         }
-        // Small first size (the old tooltip grew to every hidden line);
-        // APPEARING so a user resize survives until the next time it opens.
-        ImGui.setNextWindowPos(ImGui.getMousePos(), cn.enaium.imgui.ImGuiCond.APPEARING)
-        ImGui.setNextWindowSize(ImVec2(420f, 200f), cn.enaium.imgui.ImGuiCond.APPEARING)
-        ImGui.setNextWindowSizeConstraints(
-            ImVec2(240f, 80f),
-            ImVec2(1600f, max(viewHeight, 240f) * 2f),
+        val mouse = ImGui.getMousePos()
+        val io = ImGui.getIO()
+        val content = foldPreviewContentSize(line, range)
+        val padding = FOLD_PREVIEW_PADDING * 2f
+        val availW = maxOf(io.displaySize.x - mouse.x, FOLD_PREVIEW_MIN_WIDTH)
+        val availH = maxOf(io.displaySize.y - mouse.y, lineHeight)
+        ImGui.setNextWindowPos(mouse, cn.enaium.imgui.ImGuiCond.ALWAYS)
+        ImGui.setNextWindowSize(
+            ImVec2(
+                (content.x + padding).coerceAtLeast(FOLD_PREVIEW_MIN_WIDTH).coerceAtMost(availW),
+                (content.y + padding).coerceAtLeast(lineHeight).coerceAtMost(availH),
+            ),
+            cn.enaium.imgui.ImGuiCond.ALWAYS,
         )
         ImGui.begin(
             "##foldpreview-$uniqueId",
             null,
-            ImGuiWindowFlags.NO_TITLE_BAR or
+            ImGuiWindowFlags.NO_TITLE_BAR or ImGuiWindowFlags.NO_INPUTS or
                 ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or ImGuiWindowFlags.NO_NAV_FOCUS,
         )
         renderFoldPreviewBody(line, range)
-        val pos = ImGui.getWindowPos()
-        val size = ImGui.getWindowSize()
-        foldPreviewMin = pos
-        foldPreviewMax = ImVec2(pos.x + size.x, pos.y + size.y)
         ImGui.end()
+    }
+
+    /** The size the preview's lines take when drawn (see [renderFoldPreviewBody]). */
+    private fun foldPreviewContentSize(startLine: Int, range: EditorFoldRange): ImVec2 {
+        val last = minOf(range.endLine, buffer.lineCount() - 1)
+        var width = 0f
+        var height = 0f
+        var shown = 0
+        var line = startLine + 1
+        while (line <= last && shown < FOLD_PREVIEW_MAX_LINES) {
+            val text = buffer.line(line)
+            width = maxOf(width, if (text.isEmpty()) charWidth else ImGui.calcTextSize(text).x)
+            height += lineHeight
+            shown++
+            line++
+        }
+        // The body adds a "…" row when it stops at the line cap.
+        if (shown >= FOLD_PREVIEW_MAX_LINES) height += lineHeight
+        return ImVec2(width, height)
     }
 
     /** Lines a collapsed fold hides, colored with the editor's own spans. */
@@ -397,13 +438,18 @@ class Editor(
     private fun emitPreviewSegment(first: Boolean, segment: String, paletteIndex: Int): Boolean {
         if (segment.isEmpty()) return first
         val idx = paletteIndex.coerceIn(0, PaletteIndex.COUNT - 1)
-        val color = ImGui.colorConvertU32ToFloat4(palette[idx].toImGuiColor())
+        // ImGui.textColored is a no-op in this binding's native layer, so the
+        // preview would come out in one color; the style color is what
+        // actually reaches the renderer (the editor's own text uses the draw
+        // list for the same reason).
+        ImGui.pushStyleColor(ImGuiCol.TEXT, ImGui.colorConvertU32ToFloat4(palette[idx].toImGuiColor()))
         if (first) {
-            ImGui.textColored(color, segment)
+            ImGui.text(segment)
         } else {
             ImGui.sameLine(0f, 0f)
-            ImGui.textColored(color, segment)
+            ImGui.text(segment)
         }
+        ImGui.popStyleColor()
         return false
     }
 
@@ -426,7 +472,7 @@ class Editor(
         while (doc < count) {
             visible.add(doc)
             docLineToVisible[doc] = visible.size - 1
-            val collapsed = foldAt(doc)?.takeIf { doc in collapsedStarts }
+            val collapsed = foldAt(doc)?.takeIf { doc in collapsedLines }
             if (collapsed != null) {
                 doc = (collapsed.endLine + 1).coerceAtMost(count)
             } else {
@@ -439,10 +485,22 @@ class Editor(
 
     /** Find/replace bar pinned to the editor's top-right corner. */
     private fun renderFindPanel() {
-        if (!findVisible) return
+        if (!findEnabled) {
+            findVisible = false
+            findPanelHeight = 0f
+            return
+        }
+        if (!findVisible) {
+            findPanelHeight = 0f
+            return
+        }
         val panePos = ImGui.getWindowPos()
         val paneSize = ImGui.getWindowSize()
-        val width = 540f
+        // Never wider than the pane: a 540px panel over a narrow output pane
+        // covers the whole row it floats on.
+        val width = minOf(540f, (paneSize.x - 16f).coerceAtLeast(180f))
+        // measured below; the text needs this much extra scroll room so the
+        // lines the panel covers can be brought back into view
         ImGui.setNextWindowPos(
             ImVec2(panePos.x + paneSize.x - width - 26f, panePos.y + 8f),
             ImGuiCond.ALWAYS,
@@ -456,6 +514,7 @@ class Editor(
                 ImGuiWindowFlags.NO_MOVE or ImGuiWindowFlags.NO_FOCUS_ON_APPEARING or
                 ImGuiWindowFlags.NO_NAV_FOCUS or ImGuiWindowFlags.NO_SAVED_SETTINGS,
         )
+        findPanelHeight = ImGui.getWindowSize().y
         if (findFocusSearch) {
             ImGui.setKeyboardFocusHere()
             findFocusSearch = false
@@ -562,8 +621,47 @@ class Editor(
     // ==================== find / replace ====================
 
     /** Whether the find bar is showing. */
+    /**
+     * The find/replace bar (Cmd/Ctrl+F). Hosts rendering something that is not
+     * source code — a log console, say — turn it off: its highlights and the
+     * replace row only get in the way there.
+     */
+    var findEnabled: Boolean = true
+
+    /**
+     * Whether a collapsed fold draws "..." after its first line. Hosts whose
+     * folds *are* the line — a log console folding a frame's payload — turn it
+     * off: the line reads as itself, and clicking anywhere on it unfolds.
+     */
+    var foldEllipsis: Boolean = true
+
     var findVisible: Boolean = false
-        private set
+
+    /** Height of the find panel while it is up (measured, not reserved). */
+    private var findPanelHeight = 0f
+
+    /**
+     * Scroll room the find panel adds at the top, as a whole number of lines.
+     *
+     * The panel floats over the text and the layout must not move for it: the
+     * content is laid out with this much space above it and the scroll is
+     * pushed by the same amount, so anywhere but the very top the view is
+     * exactly what it would be without the panel. Scrolling up to the top is
+     * what the room is for — it brings the covered lines out from under it.
+     */
+    private val findInset: Float
+        get() = if (findVisible) {
+            kotlin.math.ceil(findPanelHeight / lineHeight) * lineHeight
+        } else {
+            0f
+        }
+
+    /** The inset applied last frame, so a change can be compensated. */
+    private var lastFindInset = 0f
+
+    /** Scroll position in content coordinates: negative at the very top. */
+    private val contentScroll: Float
+        get() = scrollY - findInset
 
     /** Whether the replace row is part of the bar (Cmd+R vs Cmd+F). */
     var findReplaceRow: Boolean = false
@@ -962,9 +1060,13 @@ class Editor(
 
     /** Opens the find bar (Cmd+F); [withReplace] also shows the replace row. */
     fun openFind(withReplace: Boolean = false) {
+        if (!findEnabled) return
+        // Replacing edits the document, so a read-only editor offers find
+        // only: the row is not shown and Cmd/Ctrl+R stays inert.
+        val replaceRow = withReplace && !readOnly
         val selected = getSelectedText()
         if (selected.isNotEmpty() && !selected.contains('\n')) findQuery = selected
-        findReplaceRow = findReplaceRow || withReplace
+        findReplaceRow = findReplaceRow || replaceRow
         findVisible = true
         findFocusSearch = true
         findCurrent = 0
@@ -1366,6 +1468,9 @@ class Editor(
         // (double-subtracting the scroll).
         val origin = ImGui.getCursorScreenPos()
         viewOriginX = origin.x + scrollX
+        // The find panel is drawn last, floating over the text like any other
+        // window: it must not reserve a row or move the content — the text
+        // scrolls under it and nothing about the layout changes.
         viewOriginY = origin.y + scrollY
         minimapWidthPx = if (showMinimap) minOf(minimapWidth, avail.x * 0.25f) else 0f
         viewWidth = (avail.x - minimapWidthPx).coerceAtLeast(0f)
@@ -1412,7 +1517,15 @@ class Editor(
         // No bottom padding: when the lines exactly fill the viewport the
         // scroll range must be zero, otherwise the window shows a small
         // useless vertical scroll (content = viewport + padding).
-        contentHeight = max(avail.y, lineHeight * visibleLineCount)
+        val inset = findInset
+        if (inset != lastFindInset) {
+            // ImGui applies a scroll target on the next frame, so the value
+            // this frame draws with has to be the one we asked for.
+            ImGui.setScrollY(scrollY + (inset - lastFindInset))
+            scrollY += inset - lastFindInset
+            lastFindInset = inset
+        }
+        contentHeight = max(avail.y, lineHeight * visibleLineCount) + inset
     }
 
     /**
@@ -1628,7 +1741,7 @@ class Editor(
         }
 
         val x = mouse.x - textStartX + scrollX
-        val y = mouse.y - textStartY + scrollY
+        val y = mouse.y - textStartY - findInset + scrollY
         val row = floor(y / lineHeight).toInt().coerceIn(0, max(0, visibleLineCount - 1))
         val line = visibleDocLines.getOrElse(row) { buffer.lineCount() - 1 }
         val col = columnAtX(line, x)
@@ -1664,10 +1777,16 @@ class Editor(
         // must not also move the caret. Hit-test in SCREEN coordinates:
         // `x` above is content-relative (mouse.x - textStartX + scrollX),
         // so comparing it against a screen-space edge never matched.
-        if (ImGui.isItemClicked(0) && !overGutter && line in collapsedStarts && foldAt(line) != null) {
-            val ellipsisW = ImGui.calcTextSize("...").x
+        if (ImGui.isItemClicked(0) && !overGutter && line in collapsedLines && foldAt(line) != null) {
+            // With the ellipsis hidden there is nothing to aim at, so the
+            // whole line is the target; otherwise only the "..." is.
+            // A substituted line has no marker to aim at: the whole row is
+            // the target, and hovering it previews what the fold hides.
+            val substituted = foldAt(line)?.collapsedText != null
+            val markerW = ImGui.calcTextSize("...").x
             val ex = textStartX - scrollX + lineVisualAdvance(line, buffer.line(line).length) + charWidth * 0.5f
-            if (mouse.x >= ex && mouse.x <= ex + ellipsisW) {
+            val hit = substituted || (mouse.x >= ex && mouse.x <= ex + markerW)
+            if (hit) {
                 toggleFold(line)
                 endHover()
                 return
@@ -1867,11 +1986,11 @@ class Editor(
         // primary modifier is Cmd on macOS (ImGui's Ctrl/Super naming is not
         // reliable across backends, so both are accepted).
         val primary = ctrl || ImGui.isKeyDown(ImGuiKey.MOD_SUPER)
-        if (primary && ImGui.isKeyPressed(ImGuiKey.F, false)) {
+        if (findEnabled && primary && ImGui.isKeyPressed(ImGuiKey.F, false)) {
             openFind(withReplace = false)
             return
         }
-        if (primary && ImGui.isKeyPressed(ImGuiKey.R, false)) {
+        if (findEnabled && !readOnly && primary && ImGui.isKeyPressed(ImGuiKey.R, false)) {
             openFind(withReplace = true)
             return
         }
@@ -1903,21 +2022,11 @@ class Editor(
         // Folding: Ctrl+Shift+[ folds the range containing the cursor,
         // Ctrl+Shift+] unfolds it (VS Code-style).
         if (ctrl && shift && ImGui.isKeyPressed(ImGuiKey.LEFT_BRACKET)) {
-            val f = foldAt(cursor.line) ?: containingFold(cursor.line)
-            if (f != null && !collapsedStarts.add(f.startLine)) {
-                collapsedStarts.remove(f.startLine)
-            }
-            foldsDirty = true
+            toggleFold(cursor.line)
             return
         }
         if (ctrl && shift && ImGui.isKeyPressed(ImGuiKey.RIGHT_BRACKET)) {
-            var changed = false
-            for (r in foldRanges) {
-                if (cursor.line in (r.startLine + 1)..r.endLine && collapsedStarts.remove(r.startLine)) {
-                    changed = true
-                }
-            }
-            if (changed) foldsDirty = true
+            unfoldAround(cursor.line)
             return
         }
 
@@ -2188,8 +2297,8 @@ class Editor(
         val origin = ImVec2(viewOriginX, viewOriginY)
         val width = viewWidth
         val height = viewHeight
-        val firstRow = floor(scrollY / lineHeight).toInt().coerceIn(0, max(0, visibleLineCount - 1))
-        val lastRow = floor((scrollY + height) / lineHeight).toInt().coerceIn(firstRow, max(0, visibleLineCount - 1))
+        val firstRow = floor(contentScroll / lineHeight).toInt().coerceAtMost(max(0, visibleLineCount - 1))
+        val lastRow = floor((contentScroll + height) / lineHeight).toInt().coerceIn(firstRow, max(0, visibleLineCount - 1))
 
         // Background + current-line highlight.
         drawList.DrawRectFilled(
@@ -2229,10 +2338,10 @@ class Editor(
 
         // Gutter with line numbers, fold markers + diagnostics markers.
         if (showLineNumbers) {
-            for (row in firstRow..lastRow) {
+            for (row in max(0, firstRow)..lastRow) {
                 val line = visibleDocLines[row]
                 val marker = markers[line]
-                val numY = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+                val numY = textStartY + (row - firstRow) * lineHeight - (contentScroll % lineHeight)
                 val color = if (line == currentLine) {
                     palette[PaletteIndex.LINE_NUMBER_SELECTED]
                 } else marker?.lineNumberColor ?: palette[PaletteIndex.LINE_NUMBER]
@@ -2262,7 +2371,7 @@ class Editor(
                 // to unfold) — IntelliJ style frame so the toggle targets are
                 // visible at a glance. ASCII glyphs render in any mono font.
                 if (foldAt(line) != null) {
-                    val folded = line in collapsedStarts
+                    val folded = line in collapsedLines
                     val markerX = origin.x + gutterWidth - charWidth - foldMarkerGap()
                     val color = palette[PaletteIndex.LINE_NUMBER].toImGuiColor()
                     // Square frame centred on the glyph (not a stretched
@@ -2299,14 +2408,20 @@ class Editor(
             ImVec2(origin.x + width, origin.y + height),
             true,
         )
-        for (row in firstRow..lastRow) {
+        for (row in max(0, firstRow)..lastRow) {
             val line = visibleDocLines[row]
-            val text = buffer.line(line)
+            // A collapsed fold that carries LSP's collapsedText shows that
+            // text in place of the line — it IS the row while the fold is
+            // closed, and everything the fold hides sits under it. The spans
+            // still come from the line: collapsedText is the line's own text,
+            // not a separate token stream.
+            val collapsedFold = if (line in collapsedLines) foldAt(line) else null
+            val text = collapsedFold?.collapsedText ?: buffer.line(line)
             // Code lenses render in the line's leading whitespace, before
             // the text (VS Code style): dim clickable labels.
             val lenses = codeLensProvider?.invoke(line)
             if (!lenses.isNullOrEmpty()) {
-                val ly = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+                val ly = textStartY + (row - firstRow) * lineHeight - (contentScroll % lineHeight)
                 val mx = ImGui.getMousePos()
                 var lx = textStartX - scrollX
                 for (lens in lenses) {
@@ -2333,7 +2448,7 @@ class Editor(
                 }
             }
             if (text.isEmpty()) continue
-            val y = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+            val y = textStartY + (row - firstRow) * lineHeight - (contentScroll % lineHeight)
 
             // Host + find highlights sit between the line background and the
             // glyphs.
@@ -2442,25 +2557,42 @@ class Editor(
             }
             // Ellipsis when the line is a collapsed fold start: hovering it
             // previews the hidden snippet, clicking it unfolds (handled in
-            // handleMouse so the caret does not also jump).
-            if (line in collapsedStarts) {
-                val ellipsis = "..."
-                val ex = x + charWidth * 0.5f
-                val ew = ImGui.calcTextSize(ellipsis).x
-                val hovered = ImGui.isWindowHovered() &&
-                    ImGui.getMousePos().let { m ->
-                        m.x >= ex && m.x <= ex + ew && m.y >= y && m.y <= y + lineHeight
+            // handleMouse so the caret does not also jump). A fold with its
+            // own collapsedText has already replaced the line above, so it
+            // needs no ellipsis — but it still previews on hover.
+            if (line in collapsedLines) {
+                val pointer = ImGui.getMousePos()
+                val onRow = pointer.y >= y && pointer.y <= y + lineHeight
+                if (collapsedFold?.collapsedText == null && foldEllipsis) {
+                    // The ellipsis sits past the end of the text, so its own
+                    // rect is the target — not the row's.
+                    val ex = x + charWidth * 0.5f
+                    val ew = ImGui.calcTextSize("...").x
+                    val overMarker = ImGui.isWindowHovered() && onRow &&
+                        pointer.x >= ex && pointer.x <= ex + ew
+                    drawList.DrawText(
+                        ImVec2(ex, y),
+                        "...",
+                        if (overMarker) {
+                            palette[PaletteIndex.TEXT].toImGuiColor()
+                        } else {
+                            palette[PaletteIndex.INLAY_HINT].toImGuiColor()
+                        },
+                    )
+                    if (overMarker) requestFoldPreview(line)
+                } else {
+                    // The row IS the fold's label; hovering the label previews
+                    // what the fold hides, the same as hovering the ellipsis
+                    // does. Only the text's own width counts — the empty space
+                    // to its right is not part of the label.
+                    val labelLeft = textStartX - scrollX
+                    val labelRight = x
+                    if (ImGui.isWindowHovered() && onRow &&
+                        pointer.x >= labelLeft && pointer.x <= labelRight
+                    ) {
+                        requestFoldPreview(line)
                     }
-                drawList.DrawText(
-                    ImVec2(ex, y),
-                    ellipsis,
-                    if (hovered) {
-                        palette[PaletteIndex.TEXT].toImGuiColor()
-                    } else {
-                        palette[PaletteIndex.INLAY_HINT].toImGuiColor()
-                    },
-                )
-                if (hovered) requestFoldPreview(line)
+                }
             }
             // Diagnostic squiggle under the reported character range(s)
             // (falls back to the whole line when no range is given).
@@ -2522,7 +2654,7 @@ class Editor(
                 // text exactly even with proportional fonts; inlay hints push
                 // it right like the rendered text.
                 val x = textStartX - scrollX + lineVisualAdvance(cl, cursor.index)
-                val y = textStartY + (row - firstRow) * lineHeight - (scrollY % lineHeight)
+                val y = textStartY + (row - firstRow) * lineHeight - (contentScroll % lineHeight)
                 val w = charWidth * cursorWidthChars.coerceIn(0f, 1f)
                 val h = lineHeight * cursorHeightLines.coerceIn(0f, 1f)
                 drawList.DrawRectFilled(
@@ -2756,12 +2888,12 @@ class Editor(
     /** Screen-space y of [line]'s top edge (null when the line is not visible). */
     fun posScreenY(line: Int): Float? {
         val row = line.visibleRowOrNull() ?: return null
-        return textStartY + row * lineHeight - (scrollY % lineHeight)
+        return textStartY + row * lineHeight - (contentScroll % lineHeight)
     }
 
     fun caretScreenY(): Float {
         val row = cursor.line.visibleRowOrNull()
-        val firstRow = floor(scrollY / lineHeight).toInt().coerceIn(0, max(0, visibleLineCount - 1))
+        val firstRow = floor(contentScroll / lineHeight).toInt().coerceAtMost(max(0, visibleLineCount - 1))
         val r = row ?: firstRow
         return textStartY + (r - firstRow) * lineHeight - (scrollY % lineHeight)
     }

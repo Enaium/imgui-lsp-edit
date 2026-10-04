@@ -197,8 +197,10 @@ object SyntaxHighlighter {
                 continue
             }
 
-            // Number.
-            if (c.isDigit()) {
+            // Number. isNumber() comes from numberChars, which a host may
+            // leave empty: without the second test the scan below would not
+            // advance and the loop would never end.
+            if (c.isDigit() && isNumber(c)) {
                 val start = i
                 while (i < line.length && isNumber(line[i])) i++
                 flush(tokenStart, start, tokenPalette)

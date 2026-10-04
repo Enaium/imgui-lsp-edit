@@ -1135,7 +1135,7 @@ class LspEditor(
                     null // server did not answer in time; retry if dirty
                 }
                 if (ranges != null && !foldingDirty) {
-                    applyFoldingRanges(ranges.map { EditorFoldRange(it.startLine, it.endLine) })
+                    applyFoldingRanges(ranges.map { EditorFoldRange(it.startLine, it.endLine, it.collapsedText) })
                 }
             }
         }

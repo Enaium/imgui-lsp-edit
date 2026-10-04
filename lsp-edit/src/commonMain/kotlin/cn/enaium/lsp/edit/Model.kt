@@ -111,7 +111,24 @@ data class EditorInlayHint(val position: DocPos, val label: String)
  * A collapsible line range: when collapsed, [startLine] stays visible and
  * [startLine + 1 .. endLine] are hidden. Ranges may nest.
  */
-data class EditorFoldRange(val startLine: Int, val endLine: Int)
+data class EditorFoldRange(
+    val startLine: Int,
+    val endLine: Int,
+    /**
+     * LSP's `FoldingRange.collapsedText`: the text to show when the range is
+     * collapsed, in place of the line. Null keeps the line itself (with the
+     * "..." affordance when [Editor.foldEllipsis] is on).
+     */
+    val collapsedText: String? = null,
+    /**
+     * Stable identity of the folded content. Line numbers move when a host
+     * rebuilds a document whose head is trimmed (a console keeping its last N
+     * entries), and the collapse state must follow the content, not the
+     * position: with a key, an expanded frame stays expanded after the lines
+     * above it slid away. Null falls back to [startLine].
+     */
+    val key: Long? = null,
+)
 
 /**
  * A code lens rendered above [line]: [title] is drawn as a dim clickable
