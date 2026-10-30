@@ -25,12 +25,12 @@ need:
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("cn.enaium.imgui:lsp-edit:1.0.3")
+            implementation("cn.enaium.imgui:lsp-edit:1.0.4")
             // lsp-edit's signatures are written in these types, and the
             // published POM keeps them at runtime scope — declare them too,
             // or calls like editor.render("##e", ImVec2(-1f, -1f)) do not
             // compile.
-            implementation("cn.enaium.imgui:imgui-kmp:1.0.16")   // ImVec2, ImGui, Icon…
+            implementation("cn.enaium.imgui:imgui-kmp:1.93.0.1")   // ImVec2, ImGui, Icon…
             implementation("cn.enaium:lsp-kmp:1.0.1")            // LspClient, DapSession…
         }
     }
@@ -42,8 +42,8 @@ Through a version catalog:
 ```toml
 # gradle/libs.versions.toml
 [versions]
-lsp-edit = "1.0.3"
-imgui-kmp = "1.0.16"
+lsp-edit = "1.0.4"
+imgui-kmp = "1.93.0.1"
 lsp-kmp = "1.0.1"
 
 [libraries]
@@ -57,7 +57,7 @@ scope, so they are on the classpath at run time):
 
 | Dependency | Version | What it brings |
 | --- | --- | --- |
-| `imgui-kmp` | 1.0.16 | the ImGui bindings the widget renders through |
+| `imgui-kmp` | 1.93.0.1 | the ImGui bindings the widget renders through |
 | `lsp-kmp` | 1.0.1 | protocol models, transports, the DAP client |
 | `ktreesitter` | 0.25.1 | the tree-sitter core (grammars are yours to add) |
 | `xicons-imgui-core` / `xicons-imgui-intellij` | 1.0.3 | the icon set (completion kinds, breakpoints) |

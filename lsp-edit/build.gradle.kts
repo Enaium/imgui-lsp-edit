@@ -121,7 +121,7 @@ mavenPublishing {
     pom {
         name = "lsp-edit"
         description = "A Langauge Server Protocol (LSP) driven code editor widget for Kotlin Multiplatform, rendered with Dear ImGui via imgui-kmp, powered by lsp-kmp."
-        url = "https://github.com/Enaium/lsp-edit"
+        url = "https://github.com/Enaium/imgui-lsp-edit"
         licenses {
             license {
                 name = "MIT License"
@@ -136,9 +136,9 @@ mavenPublishing {
             }
         }
         scm {
-            url = "https://github.com/Enaium/lsp-edit"
-            connection = "scm:git:git@github.com:Enaium/lsp-edit.git"
-            developerConnection = "scm:git:git@github.com:Enaium/lsp-edit.git"
+            url = "https://github.com/Enaium/imgui-lsp-edit"
+            connection = "scm:git:git@github.com:Enaium/imgui-lsp-edit.git"
+            developerConnection = "scm:git:git@github.com:Enaium/imgui-lsp-edit.git"
         }
     }
 }
